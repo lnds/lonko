@@ -428,6 +428,21 @@ impl App {
             .status();
     }
 
+    /// Returns true when lonko is the only pane left in its current tmux session,
+    /// so it should exit cleanly instead of lingering as a solitary pane/window.
+    /// Skips lonko-internal sessions (lonko-tray, floating-*) where lonko is meant
+    /// to keep running in the background.
+    fn should_self_quit_when_alone(&self) -> bool {
+        let Some(own) = self.state.own_pane.as_deref() else { return false };
+        let Some(session) = tmux::tmux_session_for_pane(own) else { return false };
+        if session == "lonko-tray" || session.starts_with("floating-") {
+            return false;
+        }
+        let panes = tmux::list_pane_ids_in_session(&session);
+        // Session is empty (already torn down) or the only remaining pane is lonko's.
+        panes.iter().all(|p| p == own)
+    }
+
     /// Esconde el panel moviéndolo de vuelta a lonko-tray (lonko sigue corriendo).
     fn hide_panel(&self) {
         let Some(ref own) = self.state.own_pane else { return };
@@ -648,13 +663,31 @@ impl App {
 
     fn handle_event(&mut self, event: Event) -> Result<bool> {
         match event {
-            Event::Tick                                       => self.on_tick(),
+            Event::Tick                                       => {
+                self.on_tick();
+                // Fallback auto-quit check: `TmuxPaneGone` only fires for panes lonko
+                // had tracked as running Claude, so closing a plain shell pane wouldn't
+                // trigger it. Poll every ~2s with a short grace period on startup.
+                if self.state.tick >= 30
+                    && self.state.tick % 20 == 11
+                    && self.should_self_quit_when_alone()
+                {
+                    tracing::info!("auto-quit: lonko is the only pane left in its tmux session (tick)");
+                    return Ok(true);
+                }
+            }
             Event::SessionDiscovered(file)                    => self.on_session_discovered(file),
             Event::SessionRemoved(pid)                        => { self.state.remove_session_by_pid(pid); }
             Event::TmuxPaneDiscovered { pane_id, claude_pid, cwd } => {
                 self.on_tmux_pane_discovered(pane_id, claude_pid, cwd);
             }
-            Event::TmuxPaneGone { pane_id }                   => self.state.handle_pane_gone(&pane_id),
+            Event::TmuxPaneGone { pane_id }                   => {
+                self.state.handle_pane_gone(&pane_id);
+                if self.should_self_quit_when_alone() {
+                    tracing::info!("auto-quit: lonko is the only pane left in its tmux session");
+                    return Ok(true);
+                }
+            }
             Event::Key(key)                                   => return self.on_key(key),
             Event::Hook(payload)                              => self.handle_hook(payload),
             Event::FocusGained                                => self.state.focused = true,
