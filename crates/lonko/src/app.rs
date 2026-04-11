@@ -334,7 +334,7 @@ impl App {
 
         // Compute layout and capture window counts for each visible card in a
         // scoped borrow so we can mutate state below.
-        let (global_idx, card_row_start, card_h, n_windows) = {
+        let (global_idx, card_row_start, n_windows) = {
             let visible = self.state.visible_tmux_sessions();
             if visible.is_empty() {
                 return;
@@ -350,11 +350,10 @@ impl App {
             });
             let Some(card) = hit else { return };
             let n = visible[card.global_idx].windows.len();
-            (card.global_idx, card.row_start, card.card_h, n)
+            (card.global_idx, card.row_start, n)
         };
 
         let row_within_card = row_in_list - card_row_start;
-        let _ = card_h;
 
         // Double-click detection: two clicks on the same row within 400ms.
         let now = std::time::Instant::now();
