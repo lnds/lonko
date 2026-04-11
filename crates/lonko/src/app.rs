@@ -580,10 +580,10 @@ impl App {
                 let cwd = hook_cwd.unwrap_or_default().to_string();
                 if cwd.is_empty() { return; }
 
-                let parent_depth = self.state.sessions.iter()
+                let (parent_depth, parent_repo_root) = self.state.sessions.iter()
                     .find(|s| s.id == parent_session_id)
-                    .map(|s| s.depth)
-                    .unwrap_or(0);
+                    .map(|s| (s.depth, s.repo_root.clone()))
+                    .unwrap_or((0, None));
 
                 let agent_type = payload.agent_type.as_deref().unwrap_or("sub");
                 let mut session = Session::new(effective_id.clone(), 0, cwd);
@@ -591,6 +591,8 @@ impl App {
                 session.parent_id = Some(parent_session_id.clone());
                 session.depth = (parent_depth + 1).min(2);
                 session.project_name = agent_type.to_string();
+                // Subagents inherit their parent's group so they cluster together.
+                session.repo_root = parent_repo_root;
                 if let Some(pane) = hook_pane {
                     session.tmux_pane = Some(pane.to_string());
                 }
@@ -608,6 +610,17 @@ impl App {
                 hook_cwd.and_then(transcript::git_branch),
             ) {
                 return;
+            }
+            // Fill in the group key for brand-new sessions; the cwd fallback
+            // ensures non-git sessions never re-trigger the shell call on
+            // subsequent hook events.
+            if let Some(s) = self.state.sessions.iter_mut().find(|s| s.id == effective_id)
+                && s.repo_root.is_none()
+                && !s.cwd.is_empty()
+            {
+                s.repo_root = Some(
+                    crate::worktree::repo_common_root(&s.cwd).unwrap_or_else(|| s.cwd.clone()),
+                );
             }
         }
 
@@ -795,6 +808,9 @@ impl App {
         let mut session = Session::new(file.session_id.clone(), file.pid, file.cwd.clone());
         session.status = SessionStatus::Idle;
         session.tmux_pane = tmux_pane;
+        session.repo_root = Some(
+            crate::worktree::repo_common_root(&file.cwd).unwrap_or_else(|| file.cwd.clone()),
+        );
         let path = transcript::transcript_path(&file.cwd, &file.session_id);
         if let Some(mut info) = transcript::read_latest(&path) {
             info.branch = transcript::git_branch(&file.cwd).or(info.branch);
@@ -830,6 +846,8 @@ impl App {
         let mut session = Session::new(session_id.clone(), claude_pid, cwd.clone());
         session.status = SessionStatus::Idle;
         session.tmux_pane = Some(pane_id.clone());
+        session.repo_root =
+            Some(crate::worktree::repo_common_root(&cwd).unwrap_or_else(|| cwd.clone()));
         let path = transcript::transcript_path(&cwd, &session_id);
         if let Some(mut info) = transcript::read_latest(&path) {
             info.branch = transcript::git_branch(&cwd).or(info.branch);

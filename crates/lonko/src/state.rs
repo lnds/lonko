@@ -82,6 +82,16 @@ pub struct Session {
     pub last_tool: Option<String>,
     pub parent_id: Option<String>,
     pub depth: u8,
+    /// Canonical repo path shared across all worktrees of the same git repo.
+    /// Populated by callers via `worktree::repo_common_root` — left `None`
+    /// for non-git cwds. Used to group the agents list in the UI.
+    pub repo_root: Option<String>,
+}
+
+/// Trunk branches that should float to the top of their repo group in the
+/// agents list. Covers the two canonical git default branch names.
+fn is_trunk_branch(branch: Option<&str>) -> bool {
+    matches!(branch, Some("main") | Some("master"))
 }
 
 /// Return the context window size for a given model ID.
@@ -122,6 +132,7 @@ impl Session {
             last_tool: None,
             parent_id: None,
             depth: 0,
+            repo_root: None,
         }
     }
 
@@ -162,6 +173,17 @@ impl Session {
 
     pub fn is_subagent(&self) -> bool {
         self.parent_id.is_some()
+    }
+
+    /// Human-readable label for this session's group (rendered in the
+    /// agents list above a clustered repo). Uses the basename of
+    /// `repo_root` when available, falling back to the cwd basename.
+    pub fn group_label(&self) -> String {
+        let src = self.repo_root.as_deref().unwrap_or(self.cwd.as_str());
+        std::path::Path::new(src)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "ungrouped".to_string())
     }
 }
 
@@ -328,8 +350,11 @@ impl Default for AppState {
 }
 
 impl AppState {
-    /// Return sessions grouped: each main agent followed by its subagents.
-    /// Subagents without a matching parent are shown at the end.
+    /// Return sessions organized for rendering: main agents are clustered
+    /// by `repo_root` (so worktrees of the same repo sit together), and
+    /// each main is followed by its subagents. Groups appear in the order
+    /// their first member was inserted; mains without a `repo_root` form a
+    /// trailing "ungrouped" bucket. Orphaned subagents land at the end.
     pub fn visible_sessions(&self) -> Vec<&Session> {
         let filtered: Vec<&Session> = if self.search_query.is_empty() {
             self.sessions.iter().collect()
@@ -348,21 +373,51 @@ impl AppState {
                 .collect()
         };
 
-        // Separate main agents and subagents
-        let mut result: Vec<&Session> = Vec::with_capacity(filtered.len());
         let mains: Vec<&Session> = filtered.iter().copied().filter(|s| s.depth == 0).collect();
         let subs: Vec<&Session> = filtered.iter().copied().filter(|s| s.depth > 0).collect();
 
-        for main in &mains {
-            result.push(main);
-            // Append direct children sorted by last_activity (most recent first)
-            let mut children: Vec<&Session> = subs
-                .iter()
-                .copied()
-                .filter(|s| s.parent_id.as_deref() == Some(main.id.as_str()))
-                .collect();
-            children.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
-            result.extend(children);
+        // Linear-scan grouping: preserves first-seen order of keys, and the
+        // insertion order of mains within each key. `None` (non-git mains,
+        // rare in practice because app.rs falls back to cwd) always lands
+        // in the tail bucket so named repos stay on top.
+        let mut named: Vec<(Option<&str>, Vec<&Session>)> = Vec::new();
+        let mut ungrouped: Vec<&Session> = Vec::new();
+        for m in &mains {
+            match m.repo_root.as_deref() {
+                None => ungrouped.push(*m),
+                Some(key) => {
+                    if let Some(entry) = named.iter_mut().find(|(k, _)| *k == Some(key)) {
+                        entry.1.push(*m);
+                    } else {
+                        named.push((Some(key), vec![*m]));
+                    }
+                }
+            }
+        }
+        if !ungrouped.is_empty() {
+            named.push((None, ungrouped));
+        }
+
+        // Within each group, float trunk branches (`main`, `master`) to the
+        // top so the canonical checkout sits above worktree branches.
+        // Stable sort preserves insertion order between ties.
+        for (_, group_mains) in named.iter_mut() {
+            group_mains.sort_by_key(|s| if is_trunk_branch(s.branch.as_deref()) { 0 } else { 1 });
+        }
+
+        let mut result: Vec<&Session> = Vec::with_capacity(filtered.len());
+        for (_, group_mains) in &named {
+            for main in group_mains {
+                result.push(main);
+                let mut children: Vec<&Session> = subs
+                    .iter()
+                    .copied()
+                    .filter(|s| s.parent_id.as_deref() == Some(main.id.as_str()))
+                    .collect();
+                // Most recent subagent first.
+                children.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+                result.extend(children);
+            }
         }
 
         // Orphaned subagents (parent not in the list)
@@ -785,6 +840,129 @@ mod tests {
         let mut s = Session::new(id.into(), pid, "/tmp".into());
         s.tmux_pane = pane.map(String::from);
         s
+    }
+
+    fn main_with_repo(id: &str, repo: Option<&str>) -> Session {
+        let mut s = Session::new(id.into(), 0, format!("/tmp/{id}"));
+        s.repo_root = repo.map(String::from);
+        s
+    }
+
+    fn main_with_repo_branch(id: &str, repo: &str, branch: &str) -> Session {
+        let mut s = main_with_repo(id, Some(repo));
+        s.branch = Some(branch.into());
+        s
+    }
+
+    #[test]
+    fn visible_sessions_floats_trunk_branch_to_top_of_group() {
+        let mut state = AppState::default();
+        // Two worktrees of the same repo: a feature branch inserted first,
+        // then the main-branch checkout. Despite insertion order, the main
+        // branch should render first within the group.
+        state.sessions = vec![
+            main_with_repo_branch("feat", "/r/alpha", "lonko-6"),
+            main_with_repo_branch("trunk", "/r/alpha", "main"),
+        ];
+        let ids: Vec<&str> = state
+            .visible_sessions()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["trunk", "feat"]);
+    }
+
+    #[test]
+    fn visible_sessions_trunk_sort_is_stable_for_ties() {
+        let mut state = AppState::default();
+        state.sessions = vec![
+            main_with_repo_branch("feat1", "/r/alpha", "feat-a"),
+            main_with_repo_branch("feat2", "/r/alpha", "feat-b"),
+            main_with_repo_branch("feat3", "/r/alpha", "feat-c"),
+        ];
+        let ids: Vec<&str> = state
+            .visible_sessions()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        // No trunk present: insertion order preserved.
+        assert_eq!(ids, vec!["feat1", "feat2", "feat3"]);
+    }
+
+    #[test]
+    fn visible_sessions_master_also_counts_as_trunk() {
+        let mut state = AppState::default();
+        state.sessions = vec![
+            main_with_repo_branch("feat", "/r/alpha", "wip"),
+            main_with_repo_branch("trunk", "/r/alpha", "master"),
+        ];
+        let ids: Vec<&str> = state
+            .visible_sessions()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["trunk", "feat"]);
+    }
+
+    #[test]
+    fn visible_sessions_clusters_by_repo_root() {
+        let mut state = AppState::default();
+        // Interleaved insertion order: A1, B1, A2, B2. After grouping the
+        // two A-repo mains should sit together, followed by the two B-repo
+        // mains — each preserving their relative insertion order.
+        state.sessions = vec![
+            main_with_repo("a1", Some("/r/alpha")),
+            main_with_repo("b1", Some("/r/beta")),
+            main_with_repo("a2", Some("/r/alpha")),
+            main_with_repo("b2", Some("/r/beta")),
+        ];
+        let ids: Vec<&str> = state
+            .visible_sessions()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["a1", "a2", "b1", "b2"]);
+    }
+
+    #[test]
+    fn visible_sessions_ungrouped_bucket_goes_last() {
+        let mut state = AppState::default();
+        // `None` mains are inserted before a grouped main, but should drop
+        // to the end so named groups stay on top.
+        state.sessions = vec![
+            main_with_repo("n1", None),
+            main_with_repo("a1", Some("/r/alpha")),
+            main_with_repo("n2", None),
+        ];
+        let ids: Vec<&str> = state
+            .visible_sessions()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["a1", "n1", "n2"]);
+    }
+
+    #[test]
+    fn visible_sessions_subagents_stay_under_main_across_groups() {
+        let mut state = AppState::default();
+        let mut a1 = main_with_repo("a1", Some("/r/alpha"));
+        a1.last_activity = Instant::now();
+        let mut b1 = main_with_repo("b1", Some("/r/beta"));
+        b1.last_activity = Instant::now();
+        let mut sub = Session::new("s1".into(), 0, "/tmp/a1".into());
+        sub.parent_id = Some("a1".into());
+        sub.depth = 1;
+        sub.repo_root = Some("/r/alpha".into());
+        // Insert in a scrambled order
+        state.sessions = vec![b1, sub, a1];
+        let ids: Vec<&str> = state
+            .visible_sessions()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        // Visible order of groups is first-seen: b1 was inserted before
+        // a1, so beta comes first — but a1 still owns its subagent.
+        assert_eq!(ids, vec!["b1", "a1", "s1"]);
     }
 
     #[test]

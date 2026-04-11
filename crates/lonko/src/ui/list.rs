@@ -87,18 +87,57 @@ fn dim_color(c: Color) -> Color {
 const CARD_HEIGHT: u16 = 5;
 const SUB_CARD_HEIGHT: u16 = 3;
 const SEP_HEIGHT: u16 = 1;
+/// One-line group header drawn above the first card of a multi-agent group.
+const GROUP_HEADER_HEIGHT: u16 = 1;
 
 /// Card height for a session (main=5, sub=3)
 fn card_height(session: &Session) -> u16 {
     if session.is_subagent() { SUB_CARD_HEIGHT } else { CARD_HEIGHT }
 }
 
-/// Compute how many cards fit from `start` in `sessions` given `avail` lines.
-fn cards_fitting(sessions: &[&Session], start: usize, avail: u16) -> usize {
+/// For each session in `visible`, whether a group header should be drawn
+/// above it. A header appears only before the **first main agent** of a
+/// repo-root group that contains ≥2 main agents — subagents and solo
+/// mains stay header-less so vertical space is only spent on real clusters.
+///
+/// Single forward pass: first count mains per key, then walk again marking
+/// the first main of each multi-agent group.
+fn compute_header_flags(visible: &[&Session]) -> Vec<bool> {
+    use std::collections::HashMap;
+    let mut sizes: HashMap<Option<&str>, usize> = HashMap::new();
+    for s in visible.iter() {
+        if !s.is_subagent() {
+            *sizes.entry(s.repo_root.as_deref()).or_insert(0) += 1;
+        }
+    }
+    let mut flags = vec![false; visible.len()];
+    let mut prev_main_key: Option<Option<&str>> = None;
+    for (i, s) in visible.iter().enumerate() {
+        if s.is_subagent() { continue; }
+        let key = s.repo_root.as_deref();
+        let is_first = prev_main_key != Some(key);
+        if is_first && sizes.get(&key).copied().unwrap_or(0) >= 2 {
+            flags[i] = true;
+        }
+        prev_main_key = Some(key);
+    }
+    flags
+}
+
+/// Total height for the card at `visible[idx]`, including the group header
+/// when `header_flags[idx]` is set.
+fn slot_height(visible: &[&Session], idx: usize, header_flags: &[bool]) -> u16 {
+    let hdr = if header_flags[idx] { GROUP_HEADER_HEIGHT } else { 0 };
+    hdr + card_height(visible[idx])
+}
+
+/// Compute how many cards fit from `start` in `sessions` given `avail` lines,
+/// accounting for any group headers rendered inline.
+fn cards_fitting(sessions: &[&Session], start: usize, avail: u16, header_flags: &[bool]) -> usize {
     let mut used = 0u16;
     let mut count = 0;
-    for s in &sessions[start..] {
-        let h = card_height(s) + if count > 0 { SEP_HEIGHT } else { 0 };
+    for i in start..sessions.len() {
+        let h = slot_height(sessions, i, header_flags) + if count > 0 { SEP_HEIGHT } else { 0 };
         if used + h > avail { break; }
         used += h;
         count += 1;
@@ -169,9 +208,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 
     let total = visible.len();
+    let header_flags = compute_header_flags(&visible);
 
     // Variable-height cards: compute how many fit from the scroll offset
-    let cards_visible = cards_fitting(&visible, 0, list_area.height);
+    let cards_visible = cards_fitting(&visible, 0, list_area.height, &header_flags);
     let cards_visible = cards_visible.min(total);
 
     // Scroll offset: keep selected roughly centered, clamped to valid range.
@@ -185,7 +225,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     };
 
     // Recompute visible cards from the actual scroll position
-    let cards_visible = cards_fitting(&visible, scroll, list_area.height).min(total - scroll);
+    let cards_visible =
+        cards_fitting(&visible, scroll, list_area.height, &header_flags).min(total - scroll);
     let page = &visible[scroll..scroll + cards_visible];
 
     // Pre-assign icons for main agents only (subagents don't get icons)
@@ -221,19 +262,29 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         );
     }
 
-    // Cards — variable height
-    let card_constraints: Vec<Constraint> = page
-        .iter()
-        .enumerate()
-        .flat_map(|(i, s)| {
-            let h = card_height(s);
-            let mut v = vec![Constraint::Length(h)];
-            if i < page.len() - 1 {
-                v.push(Constraint::Length(SEP_HEIGHT));
-            }
-            v
-        })
-        .collect();
+    // Cards — variable height, with optional 1-line group headers interleaved
+    // before the first card of any multi-agent group. For each page element
+    // we remember its (optional header, card) chunk indices so the render
+    // loop can find them back without re-deriving the layout.
+    let mut card_constraints: Vec<Constraint> = Vec::with_capacity(page.len() * 3);
+    let mut slot_chunks: Vec<(Option<usize>, usize)> = Vec::with_capacity(page.len());
+    for (i, s) in page.iter().enumerate() {
+        let global_idx = scroll + i;
+        // Must agree with `slot_height` so `cards_fitting` reserves the right
+        // amount of space.
+        let header_idx = if header_flags[global_idx] {
+            card_constraints.push(Constraint::Length(GROUP_HEADER_HEIGHT));
+            Some(card_constraints.len() - 1)
+        } else {
+            None
+        };
+        card_constraints.push(Constraint::Length(card_height(s)));
+        let card_idx = card_constraints.len() - 1;
+        slot_chunks.push((header_idx, card_idx));
+        if i < page.len() - 1 {
+            card_constraints.push(Constraint::Length(SEP_HEIGHT));
+        }
+    }
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -241,11 +292,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         .split(outer[1]);
 
     for (i, session) in page.iter().enumerate() {
-        let chunk_idx = i * 2;
+        let (header_idx, chunk_idx) = slot_chunks[i];
         if chunk_idx >= chunks.len() { break; }
         let global_idx = scroll + i;
         let selected = global_idx == state.selected;
         let focused = state.focused_session_id.as_deref() == Some(session.id.as_str());
+
+        if let Some(hdr_idx) = header_idx {
+            render_group_header(frame, chunks[hdr_idx], session);
+        }
 
         if session.is_subagent() {
             let accent = parent_accent(&visible, global_idx);
@@ -481,6 +536,19 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
     frame.render_widget(paragraph, area);
 }
 
+/// Render a one-line group header above the first card of a multi-agent
+/// group. Label resolution lives on `Session::group_label`.
+fn render_group_header(frame: &mut Frame, area: Rect, session: &Session) {
+    let line = Line::from(vec![
+        Span::styled(" ▾ ", Style::default().fg(DIM)),
+        Span::styled(
+            session.group_label(),
+            Style::default().fg(SUBTLE).add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
 /// Render a compact 3-line subagent card with tree connector.
 fn render_subagent_card(frame: &mut Frame, area: Rect, session: &Session, ctx: SubCardCtx) {
     let SubCardCtx { selected, focused, tick, parent_accent } = ctx;
@@ -580,4 +648,63 @@ fn render_subagent_card(frame: &mut Frame, area: Rect, session: &Session, ctx: S
 
     let paragraph = Paragraph::new(content).block(block);
     frame.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn main_with_repo(id: &str, repo: &str) -> Session {
+        let mut s = Session::new(id.into(), 0, format!("/tmp/{id}"));
+        s.repo_root = Some(repo.into());
+        s
+    }
+
+    fn subagent_of(id: &str, parent: &str, repo: &str) -> Session {
+        let mut s = Session::new(id.into(), 0, format!("/tmp/{id}"));
+        s.parent_id = Some(parent.into());
+        s.depth = 1;
+        s.repo_root = Some(repo.into());
+        s
+    }
+
+    #[test]
+    fn header_flags_only_on_first_main_of_multi_agent_group() {
+        // Layout:
+        //   [0] solo main            → no header (group size 1)
+        //   [1] first main of /r/alpha (2 mains)  → header
+        //   [2] subagent of [1]      → no header (subagents never trigger)
+        //   [3] second main of /r/alpha → no header (not first in group)
+        let s0 = main_with_repo("solo", "/r/solo");
+        let s1 = main_with_repo("a1", "/r/alpha");
+        let s2 = subagent_of("sub", "a1", "/r/alpha");
+        let s3 = main_with_repo("a2", "/r/alpha");
+        let visible = vec![&s0, &s1, &s2, &s3];
+
+        let flags = compute_header_flags(&visible);
+        assert_eq!(flags, vec![false, true, false, false]);
+    }
+
+    #[test]
+    fn header_flags_subagent_between_mains_does_not_split_group() {
+        // A subagent sandwiched between two mains of the same group must
+        // not cause the second main to be treated as a new group start.
+        let s0 = main_with_repo("a1", "/r/alpha");
+        let s1 = subagent_of("sub", "a1", "/r/alpha");
+        let s2 = main_with_repo("a2", "/r/alpha");
+        let visible = vec![&s0, &s1, &s2];
+
+        let flags = compute_header_flags(&visible);
+        assert_eq!(flags, vec![true, false, false]);
+    }
+
+    #[test]
+    fn header_flags_all_solo_groups_produces_no_headers() {
+        let s0 = main_with_repo("a", "/r/alpha");
+        let s1 = main_with_repo("b", "/r/beta");
+        let visible = vec![&s0, &s1];
+
+        let flags = compute_header_flags(&visible);
+        assert_eq!(flags, vec![false, false]);
+    }
 }
