@@ -26,6 +26,40 @@ pub fn git_root(cwd: &str) -> Option<String> {
     if root.is_empty() { None } else { Some(root) }
 }
 
+/// Canonical root shared across all worktrees of the same repo.
+///
+/// Returns the parent directory of `git rev-parse --git-common-dir`, so the
+/// main repo and every linked worktree of it all map to the same path. This
+/// is the key used to group agent sessions in the UI and to locate the main
+/// repo when removing a worktree.
+///
+/// Returns `None` strictly when `cwd` is not inside a git repository or the
+/// `git` invocation fails — callers that want a soft fallback (e.g. the UI
+/// grouping path) must apply their own.
+pub fn repo_common_root(cwd: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["-C", cwd, "rev-parse", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let common_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if common_dir.is_empty() {
+        return None;
+    }
+    let common_abs = if Path::new(&common_dir).is_absolute() {
+        std::path::PathBuf::from(&common_dir)
+    } else {
+        Path::new(cwd).join(&common_dir)
+    };
+    // Canonicalize to normalize symlinks/relative segments so worktrees and
+    // the main repo compare equal regardless of how cwd was spelled.
+    let canonical = std::fs::canonicalize(&common_abs).unwrap_or(common_abs);
+    let parent = canonical.parent()?;
+    Some(parent.to_string_lossy().into_owned())
+}
+
 /// Create a git worktree, a tmux session in it, and launch claude.
 pub fn run(cwd: &str, branch: &str) -> anyhow::Result<()> {
     let root = git_root(cwd)
@@ -102,34 +136,16 @@ pub fn is_worktree(cwd: &str) -> bool {
     }
 }
 
-/// Remove a git worktree. Finds the main repo via --git-common-dir and runs
-/// `git worktree remove --force` from there.
+/// Remove a git worktree. Finds the main repo via `repo_common_root` and
+/// runs `git worktree remove --force` from there.
 pub fn remove(cwd: &str) -> anyhow::Result<()> {
-    // Get the worktree root
     let wt_root = git_root(cwd)
         .ok_or_else(|| anyhow::anyhow!("not a git repository: {cwd}"))?;
-
-    // Get the main repo's .git dir (e.g. /path/to/main-repo/.git)
-    let output = Command::new("git")
-        .args(["-C", cwd, "rev-parse", "--git-common-dir"])
-        .output()?;
-    if !output.status.success() {
-        anyhow::bail!("git rev-parse --git-common-dir failed for {cwd}");
-    }
-    let common_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    // common_dir is the .git directory of the main repo; resolve to absolute if relative
-    let common_dir_abs = if Path::new(&common_dir).is_absolute() {
-        Path::new(&common_dir).to_path_buf()
-    } else {
-        Path::new(cwd).join(&common_dir)
-    };
-    let main_repo = common_dir_abs
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("cannot derive main repo from {common_dir}"))?;
+    let main_repo = repo_common_root(cwd)
+        .ok_or_else(|| anyhow::anyhow!("cannot derive main repo from {cwd}"))?;
 
     let status = Command::new("git")
-        .args(["-C", main_repo.to_string_lossy().as_ref(),
-               "worktree", "remove", "--force", &wt_root])
+        .args(["-C", &main_repo, "worktree", "remove", "--force", &wt_root])
         .status()?;
     if !status.success() {
         anyhow::bail!("git worktree remove failed for {wt_root}");
@@ -189,5 +205,22 @@ mod tests {
             Path::new(manifest_dir).starts_with(&root),
             "git root {root} should be an ancestor of manifest dir {manifest_dir}"
         );
+    }
+
+    #[test]
+    fn repo_common_root_is_stable_within_worktree() {
+        // Every directory inside the same working tree must resolve to the
+        // same canonical repo root. This is the invariant the agents list
+        // relies on to cluster worktrees of the same repo together.
+        let from_crate = repo_common_root(env!("CARGO_MANIFEST_DIR")).expect("git repo");
+        let repo_top = git_root(env!("CARGO_MANIFEST_DIR")).expect("git repo");
+        let from_top = repo_common_root(&repo_top).expect("git repo");
+        assert_eq!(from_crate, from_top);
+        assert!(Path::new(&from_crate).is_dir());
+    }
+
+    #[test]
+    fn repo_common_root_non_git_dir() {
+        assert!(repo_common_root("/tmp").is_none());
     }
 }
