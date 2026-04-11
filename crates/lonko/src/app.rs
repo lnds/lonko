@@ -298,9 +298,9 @@ impl App {
                         s.tmux_pane = Some(p.clone());
                     }
                     self.state.focused_session_id = Some(session_id);
-                    // Repetir select-pane durante 300ms para ganarle a tmux mouse-mode.
-                    // Cada MouseUp/MouseDown re-selecciona lonko; nosotros lo sobreescribimos
-                    // repetidamente hasta que no haya más eventos de mouse pendientes.
+                    // Repeat select-pane for 300ms to beat tmux mouse-mode.
+                    // Every MouseUp/MouseDown re-selects lonko; we overwrite it
+                    // repeatedly until there are no more pending mouse events.
                     use std::sync::atomic::Ordering;
                     let my_gen = self.focus_gen.fetch_add(1, Ordering::SeqCst) + 1;
                     let gen_arc = self.focus_gen.clone();
@@ -449,7 +449,7 @@ impl App {
         !panes.is_empty() && panes.iter().all(|p| p == own)
     }
 
-    /// Esconde el panel moviéndolo de vuelta a lonko-tray (lonko sigue corriendo).
+    /// Hide the panel by moving it back to lonko-tray (lonko keeps running).
     fn hide_panel(&self) {
         let Some(ref own) = self.state.own_pane else { return };
 

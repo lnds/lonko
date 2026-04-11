@@ -18,7 +18,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
 
     // Pulse color when any session is waiting for permission
     let border_color = if !state.focused {
-        Color::Rgb(59, 66, 97) // muy dim cuando sin foco
+        Color::Rgb(59, 66, 97) // very dim when unfocused
     } else if waiting > 0 {
         let phase = (state.tick / 10) % 2;
         if phase == 0 { Color::Rgb(255, 158, 100) } else { Color::Rgb(255, 87, 34) }
@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         let phase = (state.tick / 20) % 2;
         if phase == 0 { Color::Rgb(158, 206, 106) } else { Color::Rgb(115, 218, 202) }
     } else {
-        Color::Rgb(122, 162, 247) // azul visible cuando lonko tiene foco
+        Color::Rgb(122, 162, 247) // visible blue when lonko has focus
     };
 
     let agents_color = if state.active_tab == Tab::Agents { Color::Rgb(122, 162, 247) } else { Color::Rgb(169, 177, 214) };

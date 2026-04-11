@@ -1,12 +1,12 @@
 #!/bin/bash
-# Lonko follow: cuando cambia el window activo, mueve lonko al nuevo window.
-# Usa kill-and-respawn + layout save/restore para evitar drift en el layout.
+# Lonko follow: when the active window changes, move lonko to the new window.
+# Uses kill-and-respawn + layout save/restore to avoid layout drift.
 
 LAYOUT_DIR="$HOME/.cache/lonko-layouts"
 mkdir -p "$LAYOUT_DIR"
 
-# Si lonko escribió este sentinel, es porque está navegando intencionalmente;
-# no seguirlo para que Claude quede con el foco.
+# If lonko wrote this sentinel it's navigating intentionally;
+# don't follow so Claude keeps the focus.
 SENTINEL="$HOME/.cache/lonko-no-follow"
 if [ -f "$SENTINEL" ]; then
     rm -f "$SENTINEL"
@@ -28,27 +28,27 @@ CURRENT_WIN=$(tmux display-message -p '#{window_id}')
 LONKO_WIN=$(tmux list-panes -aF "#{pane_id} #{window_id}" \
     | awk -v p="$LONKO_PANE" '$1==p {print $2}' | head -1)
 
-# No hacer nada si lonko ya está en el window actual
+# Nothing to do if lonko is already in the current window
 [ "$LONKO_WIN" = "$CURRENT_WIN" ] && exit 0
 
-# Capturar pane actual para auto-selección al arrancar lonko
+# Capture the current pane so lonko can auto-select the right session on start
 tmux display-message -p '#{pane_id}' > "$HOME/.cache/lonko-focus-pane"
 
-# Guardar el layout actual del window destino ANTES de agregar lonko
-# (para poder restaurarlo cuando lonko se vaya).
+# Save the target window's current layout BEFORE adding lonko
+# (so we can restore it when lonko leaves).
 CURRENT_LAYOUT_FILE="$LAYOUT_DIR/${CURRENT_WIN}.layout"
 tmux display-message -t "$CURRENT_WIN" -p '#{window_layout}' > "$CURRENT_LAYOUT_FILE"
 
-# Matar lonko en el window anterior (reflowa distorsionado)
+# Kill lonko in the previous window (reflows distorted)
 tmux kill-pane -t "$LONKO_PANE"
 
-# Restaurar el layout del window anterior a como estaba ANTES de que lonko
-# llegara (deshace la distorsión acumulada por el reflow).
+# Restore the previous window's layout to what it was BEFORE lonko arrived
+# (undoes the distortion accumulated by the reflow).
 OLD_LAYOUT_FILE="$LAYOUT_DIR/${LONKO_WIN}.layout"
 if [ -f "$OLD_LAYOUT_FILE" ]; then
     tmux select-layout -t "$LONKO_WIN" "$(cat "$OLD_LAYOUT_FILE")" 2>/dev/null || true
     rm -f "$OLD_LAYOUT_FILE"
 fi
 
-# Crear nuevo lonko en el window actual (columna full-height a la derecha, 22%)
+# Create a new lonko in the current window (full-height column on the right, 22%)
 tmux split-window -h -f -l 22% -t "$CURRENT_WIN" -d "lonko"

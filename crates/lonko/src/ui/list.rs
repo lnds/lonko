@@ -23,8 +23,8 @@ const BAR_BG: Color = Color::Rgb(31, 35, 53);      // tokyo night dark bg #1f233
 const BOOKMARK: Color = Color::Rgb(219, 75, 75);   // warm red bookmark ribbon #db4b4b
 
 // Focused card background: tokyo night selection highlight
-const COFFEE_BG: Color = Color::Rgb(41, 46, 66);   // tokyo night bg_highlight #292e42 — sesión tmux activa
-const NAV_BG: Color = Color::Rgb(26, 31, 53);      // cursor de navegación — entre bg y bg_highlight
+const COFFEE_BG: Color = Color::Rgb(41, 46, 66);   // tokyo night bg_highlight #292e42 — active tmux session
+const NAV_BG: Color = Color::Rgb(26, 31, 53);      // navigation cursor — between bg and bg_highlight
 
 const SESSION_ICONS: &[&str] = &[
     "🤖", "👾", "🦊", "🐺",
@@ -371,10 +371,10 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
         BorderType::Plain
     };
 
-    // Tres estados de fondo:
-    //   focused (tmux activo)  → COFFEE_BG — cálido, máxima prominencia
-    //   selected (cursor nav)  → NAV_BG    — frío/azulado, "estoy mirando aquí"
-    //   normal                 → Reset     — se funde con el fondo
+    // Three background states:
+    //   focused (active tmux)  → COFFEE_BG — warm, maximum prominence
+    //   selected (cursor nav)  → NAV_BG    — cool/bluish, "I'm looking here"
+    //   normal                 → Reset     — blends into the background
     let bg_color = match (selected, focused) {
         (_, true)     => COFFEE_BG,
         (true, false) => NAV_BG,

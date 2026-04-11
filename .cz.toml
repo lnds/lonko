@@ -10,3 +10,11 @@ version_files = [
     "crates/lonko/Cargo.toml",
     "crates/lonko-hook/Cargo.toml",
 ]
+# After cz bumps the Cargo.toml versions, regenerate Cargo.lock so the
+# workspace member entries match, then stage it so the bump commit stays
+# self-contained. `cargo check` is used (rather than `cargo update`) so
+# the bump also fails fast if the new version breaks the build.
+pre_bump_hooks = [
+    "cargo check --quiet",
+    "git add Cargo.lock",
+]
