@@ -439,8 +439,11 @@ impl App {
             return false;
         }
         let panes = tmux::list_pane_ids_in_session(&session);
-        // Session is empty (already torn down) or the only remaining pane is lonko's.
-        panes.iter().all(|p| p == own)
+        // Require a non-empty result: `list_pane_ids_in_session` also returns an
+        // empty vec when the tmux subprocess fails transiently (server restart,
+        // IO error), and we don't want that to self-quit. The genuinely-gone case
+        // is already covered by `tmux_session_for_pane` returning None above.
+        !panes.is_empty() && panes.iter().all(|p| p == own)
     }
 
     /// Esconde el panel moviéndolo de vuelta a lonko-tray (lonko sigue corriendo).
@@ -667,7 +670,9 @@ impl App {
                 self.on_tick();
                 // Fallback auto-quit check: `TmuxPaneGone` only fires for panes lonko
                 // had tracked as running Claude, so closing a plain shell pane wouldn't
-                // trigger it. Poll every ~2s with a short grace period on startup.
+                // trigger it. Every 2s (20 ticks * 100ms), offset by 11 to avoid
+                // colliding with the other periodic tasks scheduled in on_tick
+                // (% 10 == 1, % 20 == 3, is_multiple_of(10|50)). 3s startup grace.
                 if self.state.tick >= 30
                     && self.state.tick % 20 == 11
                     && self.should_self_quit_when_alone()
