@@ -138,6 +138,19 @@ pub fn list_all_pane_ids() -> Vec<String> {
         .collect()
 }
 
+/// List all pane IDs in a specific tmux session (across all its windows).
+pub fn list_pane_ids_in_session(session_name: &str) -> Vec<String> {
+    let output = Command::new("tmux")
+        .args(["list-panes", "-s", "-t", session_name, "-F", "#{pane_id}"])
+        .output();
+    let Ok(output) = output else { return vec![] };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
 /// A tmux pane that has a Claude Code process running in it.
 #[derive(Debug)]
 pub struct ClaudePaneInfo {
