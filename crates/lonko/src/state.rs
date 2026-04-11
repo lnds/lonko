@@ -487,6 +487,9 @@ impl AppState {
                 self.search_mode = false;
                 self.search_query.clear();
                 self.selected = 0;
+                self.tmux_selected = 0;
+                self.tmux_window_cursor = None;
+                self.tmux_expanded = false;
             }
             KeyCode::Enter => {
                 self.search_mode = false;
@@ -494,11 +497,17 @@ impl AppState {
             KeyCode::Backspace => {
                 self.search_query.pop();
                 self.selected = 0;
+                self.tmux_selected = 0;
+                self.tmux_window_cursor = None;
+                self.tmux_expanded = false;
             }
             KeyCode::Char('c') if ctrl => return KeyOutcome::Quit,
             KeyCode::Char(c) => {
                 self.search_query.push(c);
                 self.selected = 0;
+                self.tmux_selected = 0;
+                self.tmux_window_cursor = None;
+                self.tmux_expanded = false;
             }
             _ => {}
         }
@@ -561,9 +570,31 @@ impl AppState {
         None
     }
 
+    /// Return tmux sessions filtered by the current search query.
+    /// Matches the session name and any window name (case-insensitive substring).
+    pub fn visible_tmux_sessions(&self) -> Vec<&TmuxSession> {
+        if self.search_query.is_empty() {
+            return self.tmux_sessions.iter().collect();
+        }
+        let q = self.search_query.to_lowercase();
+        self.tmux_sessions
+            .iter()
+            .filter(|s| {
+                s.name.to_lowercase().contains(&q)
+                    || s.windows.iter().any(|w| w.name.to_lowercase().contains(&q))
+            })
+            .collect()
+    }
+
+    /// The currently selected tmux session (respecting the search filter).
+    /// Returns `None` when the filter hides everything or the list is empty.
+    pub fn selected_tmux_session(&self) -> Option<&TmuxSession> {
+        self.visible_tmux_sessions().get(self.tmux_selected).copied()
+    }
+
     /// Navigate the tmux session list by `delta` (+1 = down, -1 = up).
     pub fn navigate_tmux_session(&mut self, delta: isize) {
-        let max = self.tmux_sessions.len().saturating_sub(1);
+        let max = self.visible_tmux_sessions().len().saturating_sub(1);
         if delta > 0 {
             self.tmux_selected = (self.tmux_selected + 1).min(max);
         } else {
@@ -574,13 +605,14 @@ impl AppState {
 
     /// Navigate the window cursor within the currently expanded tmux session by `delta`.
     pub fn navigate_tmux_window(&mut self, delta: isize) {
-        let n = self.tmux_sessions
+        let visible = self.visible_tmux_sessions();
+        let n = visible
             .get(self.tmux_selected)
             .map(|s| s.windows.len())
             .unwrap_or(0);
         if n == 0 { return; }
         let cur = self.tmux_window_cursor.unwrap_or_else(|| {
-            self.tmux_sessions[self.tmux_selected]
+            visible[self.tmux_selected]
                 .windows.iter().position(|w| w.active).unwrap_or(0)
         });
         self.tmux_window_cursor = Some(if delta > 0 {
@@ -1003,6 +1035,102 @@ mod tests {
         let mut state = AppState::default();
         state.tmux_selected = 5; // out of bounds
         state.navigate_tmux_window(1);
+        assert!(state.tmux_window_cursor.is_none());
+    }
+
+    // ── visible_tmux_sessions (search filter) ───────────────────────────────
+
+    #[test]
+    fn visible_tmux_sessions_empty_query_returns_all() {
+        let mut state = AppState::default();
+        state.tmux_sessions = vec![
+            mk_tmux_session("alpha", 1),
+            mk_tmux_session("bravo", 1),
+        ];
+        assert_eq!(state.visible_tmux_sessions().len(), 2);
+    }
+
+    #[test]
+    fn visible_tmux_sessions_filters_by_session_name() {
+        let mut state = AppState::default();
+        state.tmux_sessions = vec![
+            mk_tmux_session("alpha", 1),
+            mk_tmux_session("bravo", 1),
+            mk_tmux_session("alphabet", 1),
+        ];
+        state.search_query = "alpha".into();
+        let visible = state.visible_tmux_sessions();
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].name, "alpha");
+        assert_eq!(visible[1].name, "alphabet");
+    }
+
+    #[test]
+    fn visible_tmux_sessions_filter_is_case_insensitive() {
+        let mut state = AppState::default();
+        state.tmux_sessions = vec![mk_tmux_session("AlphaFoo", 1)];
+        state.search_query = "ALPHA".into();
+        assert_eq!(state.visible_tmux_sessions().len(), 1);
+    }
+
+    #[test]
+    fn visible_tmux_sessions_filters_by_window_name() {
+        let mut state = AppState::default();
+        // mk_tmux_session creates windows named "win0", "win1", ...
+        state.tmux_sessions = vec![
+            mk_tmux_session("alpha", 2), // has "win0", "win1"
+            mk_tmux_session("bravo", 0),
+        ];
+        state.search_query = "win1".into();
+        let visible = state.visible_tmux_sessions();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].name, "alpha");
+    }
+
+    #[test]
+    fn selected_tmux_session_returns_from_filtered_list() {
+        let mut state = AppState::default();
+        state.tmux_sessions = vec![
+            mk_tmux_session("alpha", 1),
+            mk_tmux_session("bravo", 1),
+            mk_tmux_session("charlie", 1),
+        ];
+        state.search_query = "r".into(); // matches bravo, charlie
+        state.tmux_selected = 0;
+        assert_eq!(state.selected_tmux_session().unwrap().name, "bravo");
+        state.tmux_selected = 1;
+        assert_eq!(state.selected_tmux_session().unwrap().name, "charlie");
+    }
+
+    #[test]
+    fn navigate_tmux_session_clamps_against_filtered_list() {
+        let mut state = AppState::default();
+        state.tmux_sessions = vec![
+            mk_tmux_session("alpha", 1),
+            mk_tmux_session("bravo", 1),
+            mk_tmux_session("charlie", 1),
+        ];
+        state.search_query = "alpha".into(); // only 1 match
+        state.tmux_selected = 0;
+        state.navigate_tmux_session(1);
+        // Max is 0 under the filter — must stay put, not advance into filtered-out territory.
+        assert_eq!(state.tmux_selected, 0);
+    }
+
+    #[test]
+    fn apply_search_key_resets_tmux_selected() {
+        use crossterm::event::KeyCode;
+        let mut state = AppState::default();
+        state.tmux_sessions = vec![
+            mk_tmux_session("alpha", 1),
+            mk_tmux_session("bravo", 1),
+        ];
+        state.tmux_selected = 1;
+        state.tmux_expanded = true;
+        state.search_mode = true;
+        state.apply_search_key(KeyCode::Char('a'), false);
+        assert_eq!(state.tmux_selected, 0);
+        assert!(!state.tmux_expanded);
         assert!(state.tmux_window_cursor.is_none());
     }
 
