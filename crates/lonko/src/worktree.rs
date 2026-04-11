@@ -178,10 +178,16 @@ mod tests {
 
     #[test]
     fn git_root_valid_repo() {
-        // This test runs inside the lonko repo itself
-        let root = git_root(env!("CARGO_MANIFEST_DIR"));
-        assert!(root.is_some());
-        let root = root.unwrap();
-        assert!(root.ends_with("lonko"));
+        // This test runs inside a git checkout of the lonko repo. The checkout
+        // directory may be named anything (e.g. `lonko`, `lonko-lonko-16`), so
+        // instead of hardcoding a suffix, verify that the returned root is an
+        // ancestor of CARGO_MANIFEST_DIR — the only invariant we actually care
+        // about for `git_root`.
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = git_root(manifest_dir).expect("manifest dir is inside a git repo");
+        assert!(
+            Path::new(manifest_dir).starts_with(&root),
+            "git root {root} should be an ancestor of manifest dir {manifest_dir}"
+        );
     }
 }
