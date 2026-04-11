@@ -88,6 +88,12 @@ pub struct Session {
     pub repo_root: Option<String>,
 }
 
+/// Trunk branches that should float to the top of their repo group in the
+/// agents list. Covers the two canonical git default branch names.
+fn is_trunk_branch(branch: Option<&str>) -> bool {
+    matches!(branch, Some("main") | Some("master"))
+}
+
 /// Return the context window size for a given model ID.
 /// Falls back to 200_000 for unknown models.
 pub fn context_max_for_model(model: &str) -> u32 {
@@ -390,6 +396,13 @@ impl AppState {
         }
         if !ungrouped.is_empty() {
             named.push((None, ungrouped));
+        }
+
+        // Within each group, float trunk branches (`main`, `master`) to the
+        // top so the canonical checkout sits above worktree branches.
+        // Stable sort preserves insertion order between ties.
+        for (_, group_mains) in named.iter_mut() {
+            group_mains.sort_by_key(|s| if is_trunk_branch(s.branch.as_deref()) { 0 } else { 1 });
         }
 
         let mut result: Vec<&Session> = Vec::with_capacity(filtered.len());
@@ -833,6 +846,62 @@ mod tests {
         let mut s = Session::new(id.into(), 0, format!("/tmp/{id}"));
         s.repo_root = repo.map(String::from);
         s
+    }
+
+    fn main_with_repo_branch(id: &str, repo: &str, branch: &str) -> Session {
+        let mut s = main_with_repo(id, Some(repo));
+        s.branch = Some(branch.into());
+        s
+    }
+
+    #[test]
+    fn visible_sessions_floats_trunk_branch_to_top_of_group() {
+        let mut state = AppState::default();
+        // Two worktrees of the same repo: a feature branch inserted first,
+        // then the main-branch checkout. Despite insertion order, the main
+        // branch should render first within the group.
+        state.sessions = vec![
+            main_with_repo_branch("feat", "/r/alpha", "lonko-6"),
+            main_with_repo_branch("trunk", "/r/alpha", "main"),
+        ];
+        let ids: Vec<&str> = state
+            .visible_sessions()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["trunk", "feat"]);
+    }
+
+    #[test]
+    fn visible_sessions_trunk_sort_is_stable_for_ties() {
+        let mut state = AppState::default();
+        state.sessions = vec![
+            main_with_repo_branch("feat1", "/r/alpha", "feat-a"),
+            main_with_repo_branch("feat2", "/r/alpha", "feat-b"),
+            main_with_repo_branch("feat3", "/r/alpha", "feat-c"),
+        ];
+        let ids: Vec<&str> = state
+            .visible_sessions()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        // No trunk present: insertion order preserved.
+        assert_eq!(ids, vec!["feat1", "feat2", "feat3"]);
+    }
+
+    #[test]
+    fn visible_sessions_master_also_counts_as_trunk() {
+        let mut state = AppState::default();
+        state.sessions = vec![
+            main_with_repo_branch("feat", "/r/alpha", "wip"),
+            main_with_repo_branch("trunk", "/r/alpha", "master"),
+        ];
+        let ids: Vec<&str> = state
+            .visible_sessions()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["trunk", "feat"]);
     }
 
     #[test]
