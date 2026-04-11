@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s.as_str()) == Some("--install-hooks") {
-        println!("Installing shepherd hooks into ~/.claude/settings.json...\n");
+        println!("Installing lonko hooks into ~/.claude/settings.json...\n");
         return install::run().map_err(|e| color_eyre::eyre::eyre!(e));
     }
     if args.get(1).map(|s| s.as_str()) == Some("focus") {
@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
     if args.get(1).map(|s| s.as_str()) == Some("respond") {
         let key = args.get(2).map(|s| s.as_str()).unwrap_or("");
         if !matches!(key, "y" | "n" | "w") {
-            eprintln!("usage: shepherd respond <y|n|w>");
+            eprintln!("usage: lonko respond <y|n|w>");
             std::process::exit(1);
         }
         return respond::run(key).map_err(|e| color_eyre::eyre::eyre!(e));
@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
         let cwd = args.get(2).map(|s| s.as_str()).unwrap_or("");
         let branch = args.get(3).map(|s| s.as_str()).unwrap_or("");
         if cwd.is_empty() || branch.is_empty() {
-            eprintln!("usage: shepherd worktree <cwd> <branch>");
+            eprintln!("usage: lonko worktree <cwd> <branch>");
             std::process::exit(1);
         }
         return worktree::run(cwd, branch).map_err(|e| color_eyre::eyre::eyre!(e));

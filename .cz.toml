@@ -7,6 +7,6 @@ version = "0.31.0"
 update_changelog_on_bump = false
 major_version_zero = true
 version_files = [
-    "crates/shepherd/Cargo.toml",
-    "crates/shepherd-hook/Cargo.toml",
+    "crates/lonko/Cargo.toml",
+    "crates/lonko-hook/Cargo.toml",
 ]

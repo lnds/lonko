@@ -1,12 +1,12 @@
 [package]
-name = "shepherd-hook"
+name = "lonko-hook"
 version = "0.31.0"
 edition = "2024"
-description = "Lightweight Claude Code hook forwarder for shepherd"
+description = "Lightweight Claude Code hook forwarder for lonko"
 license = "MIT"
 
 [[bin]]
-name = "shepherd-hook"
+name = "lonko-hook"
 path = "src/main.rs"
 
 [dependencies]

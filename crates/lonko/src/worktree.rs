@@ -178,10 +178,10 @@ mod tests {
 
     #[test]
     fn git_root_valid_repo() {
-        // This test runs inside the shepherd repo itself
+        // This test runs inside the lonko repo itself
         let root = git_root(env!("CARGO_MANIFEST_DIR"));
         assert!(root.is_some());
         let root = root.unwrap();
-        assert!(root.ends_with("shepherd"));
+        assert!(root.ends_with("lonko"));
     }
 }

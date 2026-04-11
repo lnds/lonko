@@ -1,5 +1,5 @@
-// shepherd-hook: reads a Claude Code hook event from stdin and forwards it
-// to the shepherd TUI via a Unix socket.
+// lonko-hook: reads a Claude Code hook event from stdin and forwards it
+// to the lonko TUI via a Unix socket.
 //
 // Designed to be fast (<10ms) — no async runtime, no heavy deps.
 
@@ -10,14 +10,14 @@ fn socket_path() -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
         .join(".claude")
-        .join("shepherd.sock")
+        .join("lonko.sock")
 }
 
 fn log_path() -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
         .join(".claude")
-        .join("shepherd-hook.log")
+        .join("lonko-hook.log")
 }
 
 fn log(msg: &str) {
@@ -47,7 +47,7 @@ fn try_send(payload: &str) -> bool {
     }
 }
 
-/// Open the shepherd side panel (20% right split) via the toggle script.
+/// Open the lonko side panel (20% right split) via the toggle script.
 fn open_panel() {
     if std::env::var("TMUX").is_err() {
         return;
@@ -56,7 +56,7 @@ fn open_panel() {
         .arg(
             dirs::home_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-                .join(".config/tmux/scripts/shepherd-panel.sh"),
+                .join(".config/tmux/scripts/lonko-panel.sh"),
         )
         .spawn();
 }
@@ -92,28 +92,28 @@ fn main() -> anyhow::Result<()> {
 
     let enriched = serde_json::to_string(&event)?;
 
-    // Try to forward to shepherd socket
+    // Try to forward to lonko socket
     if try_send(&enriched) {
         return Ok(());
     }
 
-    // shepherd not running — if this is Notification or Stop, open the panel and retry
+    // lonko not running — if this is Notification or Stop, open the panel and retry
     let hook_name = event["hook_event_name"].as_str().unwrap_or("");
     let should_open = matches!(hook_name, "Notification" | "Stop");
     if should_open {
-        log(&format!("shepherd not running, opening panel for {hook_name} event"));
+        log(&format!("lonko not running, opening panel for {hook_name} event"));
         open_panel();
 
-        // Wait for shepherd to start, then retry a few times
+        // Wait for lonko to start, then retry a few times
         for delay_ms in [200, 400, 600, 800] {
             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
             if try_send(&enriched) {
                 return Ok(());
             }
         }
-        log("gave up waiting for shepherd to start");
+        log("gave up waiting for lonko to start");
     } else {
-        log("shepherd not running");
+        log("lonko not running");
     }
 
     Ok(())

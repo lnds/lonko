@@ -11,7 +11,7 @@ pub fn focus_pane(pane_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Return the name of a tmux client that is NOT attached to shepherd-tray.
+/// Return the name of a tmux client that is NOT attached to lonko-tray.
 pub fn find_main_client() -> Option<String> {
     let output = Command::new("tmux")
         .args(["list-clients", "-F", "#{client_name} #{session_name}"])
@@ -22,7 +22,7 @@ pub fn find_main_client() -> Option<String> {
         let mut parts = line.splitn(2, ' ');
         let client  = parts.next()?.to_string();
         let session = parts.next()?.trim();
-        if session != "shepherd-tray" {
+        if session != "lonko-tray" {
             return Some(client);
         }
     }
@@ -183,9 +183,9 @@ pub fn scan_claude_panes(own_pane: Option<&str>) -> Vec<ClaudePaneInfo> {
 
 // ── Session listing ─────────────────────────────────────────────────────────────
 
-/// Sessions that shepherd creates internally — exclude from the Sessions tab.
+/// Sessions that lonko creates internally — exclude from the Sessions tab.
 fn is_internal_session(name: &str) -> bool {
-    name == "shepherd-tray" || name.starts_with("floating-")
+    name == "lonko-tray" || name.starts_with("floating-")
 }
 
 /// Switch-client to a specific window within a session.
@@ -200,7 +200,7 @@ pub fn focus_session_window(session: &str, window_index: u32) -> anyhow::Result<
     Ok(())
 }
 
-/// List local tmux sessions, excluding shepherd-internal ones.
+/// List local tmux sessions, excluding lonko-internal ones.
 /// Returns (name, attached, last_activity_secs) per session.
 pub fn list_tmux_sessions() -> Vec<crate::state::TmuxSession> {
     let Ok(output) = Command::new("tmux")

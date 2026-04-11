@@ -1,4 +1,4 @@
-// Unix socket server that receives Claude Code hook events forwarded by shepherd-hook.
+// Unix socket server that receives Claude Code hook events forwarded by lonko-hook.
 // Each line on the socket is a JSON object enriched with TMUX env vars.
 
 use std::path::PathBuf;
@@ -15,7 +15,7 @@ pub fn socket_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".claude")
-        .join("shepherd.sock")
+        .join("lonko.sock")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -30,7 +30,7 @@ pub struct HookPayload {
     // Notification message and type (from Notification hook)
     pub message: Option<String>,
     pub notification_type: Option<String>,
-    // Enriched by shepherd-hook
+    // Enriched by lonko-hook
     pub tmux_pane: Option<String>,
     // Subagent fields (present when hook fires from a subagent context)
     pub parent_session_id: Option<String>,

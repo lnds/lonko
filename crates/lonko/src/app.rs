@@ -33,11 +33,11 @@ pub fn compute_scroll_offset(selected: usize, total: usize, visible: usize) -> u
     }
 }
 
-/// Write the no-follow sentinel so shepherd-follow.sh skips the next hook trigger.
+/// Write the no-follow sentinel so lonko-follow.sh skips the next hook trigger.
 pub fn write_no_follow_sentinel() {
     let sentinel = dirs::cache_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("shepherd-no-follow");
+        .join("lonko-no-follow");
     let _ = std::fs::write(&sentinel, "");
 }
 
@@ -99,10 +99,10 @@ pub fn hook_event_to_status(
 pub fn notify_if_needed(project_name: &str, status: &SessionStatus) {
     let (summary, body) = match status {
         SessionStatus::WaitingForUser(msg) => {
-            (format!("shepherd · {} ⚠", project_name), msg.clone())
+            (format!("lonko · {} ⚠", project_name), msg.clone())
         }
         SessionStatus::WaitingForInput => {
-            (format!("shepherd · {}", project_name), "listo, esperando tu input".into())
+            (format!("lonko · {}", project_name), "listo, esperando tu input".into())
         }
         _ => return,
     };
@@ -171,10 +171,10 @@ impl App {
             }
         }
 
-        // Read focus-pane hint written by shepherd-panel.sh
+        // Read focus-pane hint written by lonko-panel.sh
         let focus_file = dirs::home_dir()
             .unwrap_or_default()
-            .join(".cache/shepherd-focus-pane");
+            .join(".cache/lonko-focus-pane");
         if let Ok(pane) = std::fs::read_to_string(&focus_file) {
             let pane = pane.trim().to_string();
             if !pane.is_empty() {
@@ -299,7 +299,7 @@ impl App {
                     }
                     self.state.focused_session_id = Some(session_id);
                     // Repetir select-pane durante 300ms para ganarle a tmux mouse-mode.
-                    // Cada MouseUp/MouseDown re-selecciona shepherd; nosotros lo sobreescribimos
+                    // Cada MouseUp/MouseDown re-selecciona lonko; nosotros lo sobreescribimos
                     // repetidamente hasta que no haya más eventos de mouse pendientes.
                     use std::sync::atomic::Ordering;
                     let my_gen = self.focus_gen.fetch_add(1, Ordering::SeqCst) + 1;
@@ -428,7 +428,7 @@ impl App {
             .status();
     }
 
-    /// Esconde el panel moviéndolo de vuelta a shepherd-tray (shepherd sigue corriendo).
+    /// Esconde el panel moviéndolo de vuelta a lonko-tray (lonko sigue corriendo).
     fn hide_panel(&self) {
         let Some(ref own) = self.state.own_pane else { return };
 
@@ -441,27 +441,27 @@ impl App {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        // Ensure shepherd-tray exists
+        // Ensure lonko-tray exists
         let tray_exists = std::process::Command::new("tmux")
-            .args(["has-session", "-t", "shepherd-tray"])
+            .args(["has-session", "-t", "lonko-tray"])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
         if !tray_exists {
             let _ = std::process::Command::new("tmux")
-                .args(["new-session", "-d", "-s", "shepherd-tray"])
+                .args(["new-session", "-d", "-s", "lonko-tray"])
                 .status();
         }
 
         let _ = std::process::Command::new("tmux")
-            .args(["break-pane", "-d", "-s", own, "-t", "shepherd-tray:"])
+            .args(["break-pane", "-d", "-s", own, "-t", "lonko-tray:"])
             .status();
 
         // Restore the window's saved layout (undoes the distortion that happened
-        // when shepherd was added to this window). Drops the layout file on success.
+        // when lonko was added to this window). Drops the layout file on success.
         if let Some(win) = win_id {
             let home = std::env::var("HOME").unwrap_or_default();
-            let layout_path = format!("{home}/.cache/shepherd-layouts/{win}.layout");
+            let layout_path = format!("{home}/.cache/lonko-layouts/{win}.layout");
             if let Ok(layout) = std::fs::read_to_string(&layout_path) {
                 let layout = layout.trim();
                 if !layout.is_empty() {
@@ -681,7 +681,7 @@ impl App {
     fn on_tick(&mut self) {
         self.state.tick = self.state.tick.wrapping_add(1);
         // Poll the active tmux pane every ~1s to keep the focused session current.
-        // Skip update when shepherd's own pane is active — keep last known focus.
+        // Skip update when lonko's own pane is active — keep last known focus.
         if self.state.tick.is_multiple_of(10)
             && let Some(active) = tmux::active_pane()
         {
@@ -695,7 +695,7 @@ impl App {
         }
         // Prune sessions that completed more than 30 seconds ago
         self.state.prune_completed(30);
-        // Write session cache every second for `shepherd focus N`.
+        // Write session cache every second for `lonko focus N`.
         if self.state.tick % 10 == 1 {
             self.write_sessions_cache();
         }
@@ -966,7 +966,7 @@ impl App {
     fn kill_selected_agent(&mut self) {
         let Some(session) = self.state.selected_session() else { return };
         if matches!(session.status, SessionStatus::Completed) { return; }
-        // Never kill the session shepherd is running in
+        // Never kill the session lonko is running in
         if let (Some(own), Some(sp)) = (&self.state.own_pane, &session.tmux_pane) {
             if own == sp { return; }
         }
@@ -984,11 +984,11 @@ impl App {
     }
 
     /// Hard kill: send Ctrl-C, then destroy the tmux session and remove the git worktree.
-    /// Refuses to kill shepherd's own session or sessions not running in a worktree.
+    /// Refuses to kill lonko's own session or sessions not running in a worktree.
     fn kill_and_remove_worktree(&mut self) {
         let Some(session) = self.state.selected_session() else { return };
 
-        // Never kill the session shepherd is running in
+        // Never kill the session lonko is running in
         if let (Some(own), Some(sp)) = (&self.state.own_pane, &session.tmux_pane) {
             if own == sp { return; }
         }
@@ -1014,7 +1014,7 @@ impl App {
         let tmux_session_name = pane.as_deref()
             .and_then(tmux::tmux_session_for_pane);
 
-        // Remove from shepherd state
+        // Remove from lonko state
         self.state.sessions.retain(|s| s.id != session_id);
         // Clamp selection
         let len = self.state.sessions.len();
@@ -1067,14 +1067,14 @@ impl App {
     }
 
     /// Write the ordered session list to two cache files:
-    /// - ~/.cache/shepherd-sessions: one pane_id per line (for `shepherd focus N`)
-    /// - ~/.cache/shepherd-sessions-info: "N\tname\tcwd" per line (for shortcut-list.sh)
+    /// - ~/.cache/lonko-sessions: one pane_id per line (for `lonko focus N`)
+    /// - ~/.cache/lonko-sessions-info: "N\tname\tcwd" per line (for shortcut-list.sh)
     fn write_sessions_cache(&self) {
         let sessions: Vec<&crate::state::Session> = self.state.sessions.iter().collect();
 
-        // Pane IDs file (for shepherd focus N)
+        // Pane IDs file (for lonko focus N)
         // Write ALL sessions (one per line), ignoring any active search filter so that
-        // `shepherd focus N` always maps to the canonical session order.
+        // `lonko focus N` always maps to the canonical session order.
         let pane_content: String = sessions
             .iter()
             .map(|s| {
@@ -1094,7 +1094,7 @@ impl App {
             .collect();
         let info_path = dirs::cache_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-            .join("shepherd-sessions-info");
+            .join("lonko-sessions-info");
         let _ = std::fs::write(info_path, info_content);
     }
 
@@ -1299,7 +1299,7 @@ mod tests {
     fn sentinel_file_is_created() {
         let sentinel = dirs::cache_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-            .join("shepherd-no-follow");
+            .join("lonko-no-follow");
         let _ = std::fs::remove_file(&sentinel);
 
         write_no_follow_sentinel();

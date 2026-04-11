@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         let phase = (state.tick / 20) % 2;
         if phase == 0 { Color::Rgb(158, 206, 106) } else { Color::Rgb(115, 218, 202) }
     } else {
-        Color::Rgb(122, 162, 247) // azul visible cuando shepherd tiene foco
+        Color::Rgb(122, 162, 247) // azul visible cuando lonko tiene foco
     };
 
     let agents_color = if state.active_tab == Tab::Agents { Color::Rgb(122, 162, 247) } else { Color::Rgb(169, 177, 214) };
@@ -55,7 +55,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         Color::Rgb(59, 66, 97)
     };
     let mut title_spans = vec![
-        Span::styled(" shepherd ", Style::default().fg(title_color).add_modifier(bold)),
+        Span::styled(" lonko ", Style::default().fg(title_color).add_modifier(bold)),
     ];
     if running > 0 {
         title_spans.push(Span::styled(

@@ -14,7 +14,7 @@ use crate::{control::tmux, event::Event};
 /// this avoids false-positive removals if the process detection has a miss.
 ///
 /// `known_panes` is the set of pane IDs currently tracked by AppState.
-/// `own_pane` is shepherd's own tmux pane ID (excluded from scanning).
+/// `own_pane` is lonko's own tmux pane ID (excluded from scanning).
 pub fn scan(
     tx: &UnboundedSender<Event>,
     known_panes: &[String],

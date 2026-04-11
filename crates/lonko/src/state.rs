@@ -170,7 +170,7 @@ impl Session {
 fn bookmarks_path() -> std::path::PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("shepherd-bookmarks.json")
+        .join("lonko-bookmarks.json")
 }
 
 pub fn load_bookmarks() -> HashMap<String, String> {

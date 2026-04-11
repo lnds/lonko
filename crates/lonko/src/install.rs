@@ -1,5 +1,5 @@
-// shepherd --install-hooks
-// Merges shepherd-hook into ~/.claude/settings.json preserving all existing hooks.
+// lonko --install-hooks
+// Merges lonko-hook into ~/.claude/settings.json preserving all existing hooks.
 
 use std::path::PathBuf;
 
@@ -23,7 +23,7 @@ fn hook_cmd() -> String {
         .unwrap_or_else(|| PathBuf::from("/usr/local"))
         .join(".cargo")
         .join("bin")
-        .join("shepherd-hook")
+        .join("lonko-hook")
         .to_string_lossy()
         .into_owned()
 }
@@ -44,7 +44,7 @@ fn has_hook(groups: &[Value], cmd: &str) -> bool {
     })
 }
 
-/// Remove bare "shepherd-hook" entries (without full path) — left from earlier installs.
+/// Remove bare "lonko-hook" entries (without full path) — left from earlier installs.
 fn remove_stale_entries(groups: &mut Vec<Value>) {
     groups.retain(|g| {
         let cmds: Vec<&str> = g
@@ -56,8 +56,8 @@ fn remove_stale_entries(groups: &mut Vec<Value>) {
                     .collect()
             })
             .unwrap_or_default();
-        // Remove groups whose only command is the bare "shepherd-hook"
-        !cmds.iter().all(|c| *c == "shepherd-hook")
+        // Remove groups whose only command is the bare "lonko-hook"
+        !cmds.iter().all(|c| *c == "lonko-hook")
     });
 }
 
