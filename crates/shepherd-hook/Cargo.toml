@@ -1,0 +1,16 @@
+[package]
+name = "shepherd-hook"
+version = "0.31.0"
+edition = "2024"
+description = "Lightweight Claude Code hook forwarder for shepherd"
+license = "MIT"
+
+[[bin]]
+name = "shepherd-hook"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+anyhow = "1"
