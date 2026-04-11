@@ -268,7 +268,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     // loop can find them back without re-deriving the layout.
     let mut card_constraints: Vec<Constraint> = Vec::with_capacity(page.len() * 3);
     let mut slot_chunks: Vec<(Option<usize>, usize)> = Vec::with_capacity(page.len());
-    for (i, _s) in page.iter().enumerate() {
+    for (i, s) in page.iter().enumerate() {
         let global_idx = scroll + i;
         // Must agree with `slot_height` so `cards_fitting` reserves the right
         // amount of space.
@@ -278,7 +278,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         } else {
             None
         };
-        card_constraints.push(Constraint::Length(card_height(page[i])));
+        card_constraints.push(Constraint::Length(card_height(s)));
         let card_idx = card_constraints.len() - 1;
         slot_chunks.push((header_idx, card_idx));
         if i < page.len() - 1 {
@@ -648,4 +648,63 @@ fn render_subagent_card(frame: &mut Frame, area: Rect, session: &Session, ctx: S
 
     let paragraph = Paragraph::new(content).block(block);
     frame.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn main_with_repo(id: &str, repo: &str) -> Session {
+        let mut s = Session::new(id.into(), 0, format!("/tmp/{id}"));
+        s.repo_root = Some(repo.into());
+        s
+    }
+
+    fn subagent_of(id: &str, parent: &str, repo: &str) -> Session {
+        let mut s = Session::new(id.into(), 0, format!("/tmp/{id}"));
+        s.parent_id = Some(parent.into());
+        s.depth = 1;
+        s.repo_root = Some(repo.into());
+        s
+    }
+
+    #[test]
+    fn header_flags_only_on_first_main_of_multi_agent_group() {
+        // Layout:
+        //   [0] solo main            → no header (group size 1)
+        //   [1] first main of /r/alpha (2 mains)  → header
+        //   [2] subagent of [1]      → no header (subagents never trigger)
+        //   [3] second main of /r/alpha → no header (not first in group)
+        let s0 = main_with_repo("solo", "/r/solo");
+        let s1 = main_with_repo("a1", "/r/alpha");
+        let s2 = subagent_of("sub", "a1", "/r/alpha");
+        let s3 = main_with_repo("a2", "/r/alpha");
+        let visible = vec![&s0, &s1, &s2, &s3];
+
+        let flags = compute_header_flags(&visible);
+        assert_eq!(flags, vec![false, true, false, false]);
+    }
+
+    #[test]
+    fn header_flags_subagent_between_mains_does_not_split_group() {
+        // A subagent sandwiched between two mains of the same group must
+        // not cause the second main to be treated as a new group start.
+        let s0 = main_with_repo("a1", "/r/alpha");
+        let s1 = subagent_of("sub", "a1", "/r/alpha");
+        let s2 = main_with_repo("a2", "/r/alpha");
+        let visible = vec![&s0, &s1, &s2];
+
+        let flags = compute_header_flags(&visible);
+        assert_eq!(flags, vec![true, false, false]);
+    }
+
+    #[test]
+    fn header_flags_all_solo_groups_produces_no_headers() {
+        let s0 = main_with_repo("a", "/r/alpha");
+        let s1 = main_with_repo("b", "/r/beta");
+        let visible = vec![&s0, &s1];
+
+        let flags = compute_header_flags(&visible);
+        assert_eq!(flags, vec![false, false]);
+    }
 }
