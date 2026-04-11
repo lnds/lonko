@@ -331,25 +331,29 @@ impl App {
         let row_in_list = row - list_top;
 
         let list_h = self.state.term_height.saturating_sub(list_top + 1);
-        if self.state.tmux_sessions.is_empty() {
-            return;
-        }
 
-        let page = crate::ui::tmux_sessions::session_page_layout(
-            &self.state.tmux_sessions,
-            self.state.tmux_selected,
-            self.state.tmux_expanded,
-            list_h,
-        );
+        // Compute layout and capture window counts for each visible card in a
+        // scoped borrow so we can mutate state below.
+        let (global_idx, card_row_start, n_windows) = {
+            let visible = self.state.visible_tmux_sessions();
+            if visible.is_empty() {
+                return;
+            }
+            let page = crate::ui::tmux_sessions::session_page_layout(
+                &visible,
+                self.state.tmux_selected,
+                self.state.tmux_expanded,
+                list_h,
+            );
+            let hit = page.into_iter().find(|c| {
+                row_in_list >= c.row_start && row_in_list < c.row_start + c.card_h
+            });
+            let Some(card) = hit else { return };
+            let n = visible[card.global_idx].windows.len();
+            (card.global_idx, card.row_start, n)
+        };
 
-        // Find which card (and row within it) was clicked.
-        let hit = page.iter().find(|c| {
-            row_in_list >= c.row_start && row_in_list < c.row_start + c.card_h
-        });
-        let Some(card) = hit else { return };
-
-        let global_idx = card.global_idx;
-        let row_within_card = row_in_list - card.row_start;
+        let row_within_card = row_in_list - card_row_start;
 
         // Double-click detection: two clicks on the same row within 400ms.
         let now = std::time::Instant::now();
@@ -366,9 +370,8 @@ impl App {
         // Check if click lands on a window row within an expanded card.
         // Layout: rows 0-2 = header, rows 3..3+n = window rows, last row = activity bar.
         let window_row: Option<usize> = if is_expanded && row_within_card >= 3 {
-            let n = self.state.tmux_sessions[global_idx].windows.len();
             let win_idx = (row_within_card - 3) as usize;
-            if win_idx < n { Some(win_idx) } else { None }
+            if win_idx < n_windows { Some(win_idx) } else { None }
         } else {
             None
         };
@@ -415,7 +418,7 @@ impl App {
 
     /// Focus the selected tmux session (Sessions tab), optionally at a specific window.
     fn focus_tmux_session(&mut self) {
-        let Some(session) = self.state.tmux_sessions.get(self.state.tmux_selected) else { return };
+        let Some(session) = self.state.selected_tmux_session() else { return };
         let name = session.name.clone();
         if let Some(win_idx) = self.state.tmux_window_cursor {
             if let Some(window) = session.windows.get(win_idx) {
@@ -753,11 +756,14 @@ impl App {
                     })
                 });
             }
-            // Clamp selection
-            if !sessions.is_empty() {
-                self.state.tmux_selected = self.state.tmux_selected.min(sessions.len() - 1);
-            }
             self.state.tmux_sessions = sessions;
+            // Clamp selection against the filtered/visible list.
+            let visible_len = self.state.visible_tmux_sessions().len();
+            if visible_len > 0 {
+                self.state.tmux_selected = self.state.tmux_selected.min(visible_len - 1);
+            } else {
+                self.state.tmux_selected = 0;
+            }
         }
         // Scan tmux panes every 5 seconds to catch new/gone sessions.
         if self.state.tick.is_multiple_of(50)
@@ -882,6 +888,9 @@ impl App {
                 } else if !self.state.search_query.is_empty() {
                     self.state.search_query.clear();
                     self.state.selected = 0;
+                    self.state.tmux_selected = 0;
+                    self.state.tmux_window_cursor = None;
+                    self.state.tmux_expanded = false;
                 } else if self.state.show_detail {
                     self.state.show_detail = false;
                 } else {
@@ -953,8 +962,7 @@ impl App {
                 } else {
                     self.state.tmux_expanded = true;
                     // Position cursor at the active window
-                    let active_idx = self.state.tmux_sessions
-                        .get(self.state.tmux_selected)
+                    let active_idx = self.state.selected_tmux_session()
                         .and_then(|s| s.windows.iter().position(|w| w.active))
                         .unwrap_or(0);
                     self.state.tmux_window_cursor = Some(active_idx);
@@ -1080,7 +1088,7 @@ impl App {
         let cwd = if self.state.active_tab == Tab::Agents {
             self.state.selected_session().map(|s| s.cwd.clone())
         } else {
-            self.state.tmux_sessions.get(self.state.tmux_selected)
+            self.state.selected_tmux_session()
                 .and_then(|s| tmux::session_cwd(&s.name))
         };
         let Some(cwd) = cwd else { return };

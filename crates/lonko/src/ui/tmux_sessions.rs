@@ -11,6 +11,7 @@ use crate::state::{AppState, SessionOrigin, TmuxSession, TmuxWindow};
 const DIM: Color = Color::Rgb(86, 95, 137);
 const BORDER_INACTIVE: Color = Color::Rgb(59, 66, 97);
 const TEXT: Color = Color::Rgb(192, 202, 245);
+const BLUE: Color = Color::Rgb(122, 162, 247);
 const TEAL: Color = Color::Rgb(115, 218, 202);
 const ORANGE: Color = Color::Rgb(255, 158, 100);
 const GREEN: Color = Color::Rgb(158, 206, 106);
@@ -122,7 +123,7 @@ pub struct CardLayout {
 /// Used by both the renderer and the mouse hit-test handler so they share a single
 /// source of truth for scroll offset and variable card heights.
 pub fn session_page_layout(
-    sessions: &[TmuxSession],
+    sessions: &[&TmuxSession],
     selected: usize,
     expanded: bool,
     list_h: u16,
@@ -148,7 +149,7 @@ pub fn session_page_layout(
     for global_idx in scroll..total {
         let is_sel = global_idx == selected;
         let exp = is_sel && expanded;
-        let h = card_height(&sessions[global_idx], exp);
+        let h = card_height(sessions[global_idx], exp);
         let sep = if cards.is_empty() { 0 } else { SEP_HEIGHT };
         let needed = h + sep;
         if used + needed > list_h && !cards.is_empty() {
@@ -165,21 +166,44 @@ pub fn session_page_layout(
 }
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
-    let sessions = &state.tmux_sessions;
+    // Reserve 1 line for the search bar when active or when there's an active query.
+    let show_search = state.search_mode || !state.search_query.is_empty();
+    let search_h = if show_search { 1u16 } else { 0 };
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(search_h)])
+        .split(area);
+
+    let list_area = layout[0];
+
+    if show_search {
+        let cursor = if state.search_mode { "█" } else { "" };
+        let bar = Line::from(vec![
+            Span::styled(" / ", Style::default().fg(BLUE)),
+            Span::styled(state.search_query.clone(), Style::default().fg(TEXT)),
+            Span::styled(cursor, Style::default().fg(BLUE)),
+        ]);
+        frame.render_widget(Paragraph::new(bar), layout[1]);
+    }
+
+    let sessions = state.visible_tmux_sessions();
     if sessions.is_empty() {
-        let p = Paragraph::new(Line::from(Span::styled(
-            " no tmux sessions",
-            Style::default().fg(DIM),
-        )));
-        frame.render_widget(p, area);
+        let msg = if state.search_query.is_empty() {
+            " no tmux sessions"
+        } else {
+            " no sessions match"
+        };
+        let p = Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(DIM))));
+        frame.render_widget(p, list_area);
         return;
     }
 
     let page = session_page_layout(
-        sessions,
+        &sessions,
         state.tmux_selected,
         state.tmux_expanded,
-        area.height,
+        list_area.height,
     );
 
     // Build layout constraints.
@@ -197,10 +221,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
-        .split(area);
+        .split(list_area);
 
     for (i, card) in page.iter().enumerate() {
-        let session = &sessions[card.global_idx];
+        let session = sessions[card.global_idx];
         let selected = card.global_idx == state.tmux_selected;
         let expanded = selected && state.tmux_expanded;
         let win_cursor = if selected { state.tmux_window_cursor } else { None };
