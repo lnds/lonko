@@ -7,17 +7,17 @@
 TAB_ARG="$1"
 CURRENT_WIN="$(tmux display-message -p '#{window_id}')"
 
-# Buscar lonko en el window actual
+# Look for lonko in the current window
 LONKO_PANE=$(tmux list-panes -F "#{pane_id} #{pane_current_command}" \
     | awk '$2 == "lonko" {print $1}' | head -1)
 
 if [ -n "$LONKO_PANE" ]; then
     ACTIVE_PANE=$(tmux display-message -p '#{pane_id}')
     if [ "$ACTIVE_PANE" = "$LONKO_PANE" ] && [ -z "$TAB_ARG" ]; then
-        # Ya estamos en lonko sin tab arg — volver al pane anterior
+        # Already in lonko without a tab arg — return to the previous pane
         tmux select-pane -l
     else
-        # Panel visible — enfocar y enviar tecla de tab si corresponde
+        # Panel visible — focus it and send the tab key if applicable
         tmux select-pane -t "$LONKO_PANE"
         if [ "$TAB_ARG" = "agents" ]; then
             tmux send-keys -t "$LONKO_PANE" "a"
@@ -26,19 +26,19 @@ if [ -n "$LONKO_PANE" ]; then
         fi
     fi
 else
-    # Buscar lonko en cualquier sesión (puede estar en lonko-tray u otra)
+    # Look for lonko in any other session (it may be in lonko-tray or elsewhere)
     TRAY_PANE=$(tmux list-panes -aF "#{pane_id} #{pane_current_command} #{session_name}" \
         | awk '$2 == "lonko" && $3 != ENVIRON["CURRENT_SESSION"] {print $1}' \
         | head -1)
 
-    # Si no está fuera de esta sesión, buscar en cualquier lado (incluso lonko-tray)
+    # If not found outside the current session, look anywhere (including lonko-tray)
     if [ -z "$TRAY_PANE" ]; then
         TRAY_PANE=$(tmux list-panes -aF "#{pane_id} #{pane_current_command}" \
             | awk '$2 == "lonko" {print $1}' | head -1)
     fi
 
     if [ -z "$TRAY_PANE" ]; then
-        # No hay lonko corriendo — arrancar en lonko-tray
+        # No lonko running — start it inside lonko-tray
         tmux has-session -t lonko-tray 2>/dev/null \
             || tmux new-session -d -s lonko-tray
         tmux send-keys -t lonko-tray: "lonko" Enter
@@ -53,18 +53,18 @@ else
 
     [ -z "$TRAY_PANE" ] && exit 1
 
-    # Capturar pane actual para auto-selección de sesión en lonko
+    # Capture the current pane so lonko can auto-select the right session
     tmux display-message -p '#{pane_id}' > "${HOME}/.cache/lonko-focus-pane"
 
-    # Guardar el layout actual del window destino ANTES de agregar lonko
-    # (para poder restaurarlo cuando lonko se vaya y evitar drift).
+    # Save the target window's current layout BEFORE adding lonko
+    # (so we can restore it when lonko leaves and avoid drift).
     LAYOUT_DIR="$HOME/.cache/lonko-layouts"
     mkdir -p "$LAYOUT_DIR"
     tmux display-message -t "$CURRENT_WIN" -p '#{window_layout}' \
         > "$LAYOUT_DIR/${CURRENT_WIN}.layout"
 
-    # Kill-and-respawn: matar el pane viejo (incluso si estaba en lonko-tray)
-    # y crear uno nuevo con split-window -h -f (full-height garantizado a la derecha).
+    # Kill-and-respawn: kill the old pane (even if it was in lonko-tray)
+    # and create a new one with split-window -h -f (guaranteed full-height on the right).
     LONKO_CMD="lonko"
     [ -n "$TAB_ARG" ] && LONKO_CMD="lonko --tab $TAB_ARG"
 
