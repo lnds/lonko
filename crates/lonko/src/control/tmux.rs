@@ -342,6 +342,13 @@ pub fn kill_session(session_name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Show a message in the tmux status line. Fire-and-forget: ignores errors.
+pub fn display_message(msg: &str) {
+    let _ = Command::new("tmux")
+        .args(["display-message", msg])
+        .status();
+}
+
 /// Send a command to a tmux target followed by Enter.
 pub fn send_command(target: &str, command: &str) -> anyhow::Result<()> {
     let status = Command::new("tmux")
