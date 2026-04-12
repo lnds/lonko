@@ -332,7 +332,7 @@ impl Default for AppState {
             term_height: 0,
             term_width: 0,
             focus_pane: None,
-            focused: true,
+            focused: false,
             focused_session_id: None,
             own_pane: None,
             tmux_sessions: vec![],
