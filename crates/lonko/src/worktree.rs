@@ -78,9 +78,9 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 /// Copy the `.claude/` config directory from the source repo into a new
-/// worktree, so Claude Code agents inherit project settings (CLAUDE.md hooks,
-/// local settings, etc.). Silently skips if the source has no `.claude/` or
-/// the destination already has one.
+/// worktree, so Claude Code agents inherit local project settings
+/// (settings.local.json, allowed permissions, etc.). Silently skips if
+/// the source has no `.claude/` or the destination already has one.
 fn copy_claude_config(source_root: &str, worktree_path: &Path) {
     let src = PathBuf::from(source_root).join(".claude");
     let dst = worktree_path.join(".claude");
