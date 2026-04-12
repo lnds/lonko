@@ -1,3 +1,11 @@
+## v0.4.0 (2026-04-11)
+
+### Feat
+
+- **tmux**: auto-cleanup merged branches when removing worktree with x (#9)
+- **tmux**: press p on agent to create worktree from its PR branch (#8)
+- **worktree**: copy .claude config to new worktree if missing (#7)
+
 ## v0.3.0 (2026-04-11)
 
 ### Feat
