@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::control::tmux;
@@ -60,6 +60,37 @@ pub fn repo_common_root(cwd: &str) -> Option<String> {
     Some(parent.to_string_lossy().into_owned())
 }
 
+/// Recursively copy a directory tree from `src` to `dst`.
+/// Creates `dst` and all intermediate directories as needed.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let target = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy the `.claude/` config directory from the source repo into a new
+/// worktree, so Claude Code agents inherit project settings (CLAUDE.md hooks,
+/// local settings, etc.). Silently skips if the source has no `.claude/` or
+/// the destination already has one.
+fn copy_claude_config(source_root: &str, worktree_path: &Path) {
+    let src = PathBuf::from(source_root).join(".claude");
+    let dst = worktree_path.join(".claude");
+    if src.is_dir() && !dst.exists() {
+        if let Err(e) = copy_dir_recursive(&src, &dst) {
+            eprintln!("warning: failed to copy .claude config to worktree: {e}");
+        }
+    }
+}
+
 /// Create a git worktree, a tmux session in it, and launch claude.
 pub fn run(cwd: &str, branch: &str) -> anyhow::Result<()> {
     let root = git_root(cwd)
@@ -91,6 +122,9 @@ pub fn run(cwd: &str, branch: &str) -> anyhow::Result<()> {
             anyhow::bail!("git worktree add failed for branch '{branch}'");
         }
     }
+
+    // Copy .claude config so the new worktree inherits project settings
+    copy_claude_config(&root, &worktree_path);
 
     // Create tmux session in the worktree directory
     tmux::create_session(&session_name, &wt_str)?;
@@ -222,5 +256,67 @@ mod tests {
     #[test]
     fn repo_common_root_non_git_dir() {
         assert!(repo_common_root("/tmp").is_none());
+    }
+
+    #[test]
+    fn copy_dir_recursive_copies_nested_structure() {
+        let tmp = std::env::temp_dir().join("lonko-test-copy-dir");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let src = tmp.join("src");
+        let nested = src.join("subdir");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(src.join("a.json"), r#"{"key":"val"}"#).unwrap();
+        std::fs::write(nested.join("b.txt"), "hello").unwrap();
+
+        let dst = tmp.join("dst");
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        assert_eq!(std::fs::read_to_string(dst.join("a.json")).unwrap(), r#"{"key":"val"}"#);
+        assert_eq!(std::fs::read_to_string(dst.join("subdir/b.txt")).unwrap(), "hello");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn copy_claude_config_skips_when_dst_exists() {
+        let tmp = std::env::temp_dir().join("lonko-test-copy-claude");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let source_root = tmp.join("repo");
+        let worktree = tmp.join("wt");
+        std::fs::create_dir_all(source_root.join(".claude")).unwrap();
+        std::fs::write(source_root.join(".claude/settings.json"), "orig").unwrap();
+
+        // Pre-create destination .claude — should NOT be overwritten
+        std::fs::create_dir_all(worktree.join(".claude")).unwrap();
+        std::fs::write(worktree.join(".claude/settings.json"), "existing").unwrap();
+
+        copy_claude_config(source_root.to_str().unwrap(), &worktree);
+
+        assert_eq!(std::fs::read_to_string(worktree.join(".claude/settings.json")).unwrap(), "existing");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn copy_claude_config_copies_when_missing() {
+        let tmp = std::env::temp_dir().join("lonko-test-copy-claude-new");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let source_root = tmp.join("repo");
+        let worktree = tmp.join("wt");
+        std::fs::create_dir_all(source_root.join(".claude")).unwrap();
+        std::fs::write(source_root.join(".claude/settings.local.json"), "config").unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        copy_claude_config(source_root.to_str().unwrap(), &worktree);
+
+        assert_eq!(
+            std::fs::read_to_string(worktree.join(".claude/settings.local.json")).unwrap(),
+            "config"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
