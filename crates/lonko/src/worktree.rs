@@ -289,6 +289,107 @@ pub fn remove(cwd: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Check whether the `gh` CLI is available on the system.
+pub fn has_gh() -> bool {
+    Command::new("gh")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// PR merge state for a branch.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PrState {
+    /// The branch has a PR that was merged.
+    Merged,
+    /// The branch has a PR that is not merged (open, closed, draft).
+    NotMerged,
+    /// No PR found for this branch, or `gh` failed.
+    Unknown,
+}
+
+/// Check whether a branch has a merged PR on GitHub using `gh pr view`.
+///
+/// Runs from `repo_cwd` so `gh` picks up the correct remote.
+/// Returns `PrState::Unknown` if `gh` is not installed or the command fails.
+pub fn pr_state_for_branch(repo_cwd: &str, branch: &str) -> PrState {
+    let output = Command::new("gh")
+        .args(["pr", "view", branch, "--json", "state", "--jq", ".state"])
+        .current_dir(repo_cwd)
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let state = String::from_utf8_lossy(&o.stdout).trim().to_lowercase();
+            if state == "merged" {
+                PrState::Merged
+            } else {
+                PrState::NotMerged
+            }
+        }
+        _ => PrState::Unknown,
+    }
+}
+
+/// Delete a local branch. Uses `git branch -D` (force delete) because the
+/// caller has already confirmed via `gh` that the PR is merged — local git
+/// may not know this without a recent fetch, so `-d` would refuse.
+pub fn delete_local_branch(repo_cwd: &str, branch: &str) -> anyhow::Result<()> {
+    let output = Command::new("git")
+        .args(["-C", repo_cwd, "branch", "-D", branch])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("git branch -d {branch}: {stderr}");
+    }
+    Ok(())
+}
+
+/// Delete the remote tracking branch. Runs `git push origin --delete <branch>`.
+///
+/// NOTE: assumes the remote is named `origin`. This will fail (harmlessly) for
+/// forks or repos where the remote has a different name.
+pub fn delete_remote_branch(repo_cwd: &str, branch: &str) -> anyhow::Result<()> {
+    let output = Command::new("git")
+        .args(["-C", repo_cwd, "push", "origin", "--delete", branch])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("git push origin --delete {branch}: {stderr}");
+    }
+    Ok(())
+}
+
+/// Result of post-worktree-removal branch cleanup.
+#[derive(Debug)]
+pub struct CleanupResult {
+    pub local_deleted: bool,
+    pub remote_deleted: bool,
+}
+
+/// After a worktree is removed, check if the branch has a merged PR and clean
+/// up local + remote branches if so.
+///
+/// Returns `None` if cleanup was skipped (no gh, no branch, PR not merged).
+pub fn cleanup_merged_branch(repo_cwd: &str, branch: &str) -> Option<CleanupResult> {
+    if !has_gh() {
+        return None;
+    }
+
+    if pr_state_for_branch(repo_cwd, branch) != PrState::Merged {
+        return None;
+    }
+
+    let local_deleted = delete_local_branch(repo_cwd, branch).is_ok();
+    let remote_deleted = delete_remote_branch(repo_cwd, branch).is_ok();
+
+    Some(CleanupResult {
+        local_deleted,
+        remote_deleted,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,5 +521,39 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn has_gh_does_not_panic() {
+        // Smoke test: returns a bool regardless of whether gh is installed.
+        let _ = has_gh();
+    }
+
+    #[test]
+    fn pr_state_nonexistent_dir_returns_unknown() {
+        assert_eq!(pr_state_for_branch("/nonexistent/path", "main"), PrState::Unknown);
+    }
+
+    #[test]
+    fn pr_state_non_git_dir_returns_unknown() {
+        assert_eq!(pr_state_for_branch("/tmp", "no-such-branch-xyz"), PrState::Unknown);
+    }
+
+    #[test]
+    fn delete_local_branch_nonexistent_returns_err() {
+        let repo = git_root(env!("CARGO_MANIFEST_DIR")).expect("git repo");
+        assert!(delete_local_branch(&repo, "nonexistent-branch-xyz-999").is_err());
+    }
+
+    #[test]
+    fn delete_remote_branch_nonexistent_returns_err() {
+        let repo = git_root(env!("CARGO_MANIFEST_DIR")).expect("git repo");
+        assert!(delete_remote_branch(&repo, "nonexistent-branch-xyz-999").is_err());
+    }
+
+    #[test]
+    fn cleanup_merged_branch_non_git_dir_returns_none() {
+        // No gh available in /tmp, or no PR — either way should return None.
+        assert!(cleanup_merged_branch("/tmp", "no-such-branch").is_none());
     }
 }

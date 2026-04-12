@@ -1063,6 +1063,7 @@ impl App {
         let cwd = session.cwd.clone();
         let pid = session.pid;
         let session_id = session.id.clone();
+        let branch = session.branch.clone();
         let pane = session.tmux_pane.clone()
             .or_else(|| tmux::find_pane_for_pid(pid));
 
@@ -1089,7 +1090,11 @@ impl App {
             self.state.selected = self.state.selected.min(len - 1);
         }
 
-        // Background cleanup: kill tmux session + remove worktree.
+        // Resolve branch (fall back to live git) and main repo before moving into the closure.
+        let branch = branch.or_else(|| crate::sources::transcript::git_branch(&cwd));
+        let main_repo = crate::worktree::repo_common_root(&cwd);
+
+        // Background cleanup: kill tmux session + remove worktree + clean merged branch.
         // Bail if we couldn't resolve the tmux session — worktree and session
         // should live and die together.
         let Some(tmux_session_name) = tmux_session_name else { return };
@@ -1097,9 +1102,29 @@ impl App {
             std::thread::sleep(std::time::Duration::from_millis(500));
             let _ = tmux::kill_session(&tmux_session_name);
             if let Err(e) = crate::worktree::remove(&cwd) {
-                let _ = std::process::Command::new("tmux")
-                    .args(["display-message", &format!("worktree remove: {e}")])
-                    .status();
+                tmux::display_message(&format!("worktree remove: {e}"));
+                return;
+            }
+
+            // Try to clean up merged branches if we have the necessary info.
+            if let (Some(branch), Some(repo)) = (branch, main_repo) {
+                if let Some(result) = crate::worktree::cleanup_merged_branch(&repo, &branch) {
+                    let msg = match (result.local_deleted, result.remote_deleted) {
+                        (true, true) => format!(
+                            "cleaned up local + remote branch '{branch}' (PR merged)"
+                        ),
+                        (true, false) => format!(
+                            "branch '{branch}': local deleted, remote delete failed"
+                        ),
+                        (false, true) => format!(
+                            "branch '{branch}': remote deleted, local delete failed"
+                        ),
+                        (false, false) => format!(
+                            "branch '{branch}': PR merged but branch delete failed"
+                        ),
+                    };
+                    tmux::display_message(&msg);
+                }
             }
         });
     }
@@ -1125,10 +1150,7 @@ impl App {
         let branch = branch.to_string();
         std::thread::spawn(move || {
             if let Err(e) = crate::worktree::run(&cwd, &branch) {
-                // Show error via tmux message since we can't easily display in the TUI
-                let _ = std::process::Command::new("tmux")
-                    .args(["display-message", &format!("worktree: {e}")])
-                    .status();
+                tmux::display_message(&format!("worktree: {e}"));
             }
         });
     }
@@ -1137,23 +1159,17 @@ impl App {
     fn spawn_pr_worktree(&self) {
         let Some(session) = self.state.selected_session() else { return };
         let Some(branch) = session.branch.clone() else {
-            let _ = std::process::Command::new("tmux")
-                .args(["display-message", "pr-worktree: no branch detected for this agent"])
-                .status();
+            tmux::display_message("pr-worktree: no branch detected for this agent");
             return;
         };
         let cwd = session.cwd.clone();
         std::thread::spawn(move || {
             let Some(pr) = crate::worktree::pr_for_branch(&cwd, &branch) else {
-                let _ = std::process::Command::new("tmux")
-                    .args(["display-message", &format!("pr-worktree: no open PR found for branch '{branch}'")])
-                    .status();
+                tmux::display_message(&format!("pr-worktree: no open PR found for branch '{branch}'"));
                 return;
             };
             if let Err(e) = crate::worktree::run_from_pr(&cwd, &pr) {
-                let _ = std::process::Command::new("tmux")
-                    .args(["display-message", &format!("pr-worktree: {e}")])
-                    .status();
+                tmux::display_message(&format!("pr-worktree: {e}"));
             }
         });
     }
