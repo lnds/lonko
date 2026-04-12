@@ -1,3 +1,9 @@
+## v0.3.0 (2026-04-11)
+
+### Feat
+
+- **ui**: remove keybinding hints from footer status bar (#6)
+
 ## v0.2.0 (2026-04-11)
 
 ### Feat
