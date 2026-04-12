@@ -5,7 +5,7 @@ use ratatui::{
     widgets::Paragraph,
     Frame,
 };
-use crate::state::{AppState, Tab};
+use crate::state::AppState;
 
 const BLUE: Color = Color::Rgb(122, 162, 247);
 const DIM: Color = Color::Rgb(86, 95, 137);
@@ -32,12 +32,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
                 format!("{}▏", state.bookmark_input),
                 Style::default().fg(Color::White),
             ),
-            sep("  enter"),
-            sep(":save "),
-            sep("esc"),
-            sep(":cancel "),
-            sep("empty"),
-            sep(":remove"),
         ])
     } else if state.worktree_mode {
         Line::from(vec![
@@ -58,38 +52,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             Span::styled("n", Style::default().fg(RED)),
             sep(":no"),
         ])
-    } else if state.search_mode || !state.search_query.is_empty() {
-        let filter_label = if state.search_mode { " typing…" } else { " filtered" };
-        Line::from(vec![
-            Span::styled(filter_label, Style::default().fg(BLUE)),
-        ])
     } else {
-        let mut spans = vec![busy, sep("  "),
-            Span::styled("g", Style::default().fg(BLUE)),
-            sep(":worktree"),
-            sep(" "),
-            Span::styled("x", Style::default().fg(RED)),
-            sep(":kill "),
-            Span::styled("X", Style::default().fg(ORANGE)),
-            sep(":stop"),
-        ];
-        if state.active_tab == Tab::Agents {
-            spans.extend([
-                sep(" "),
-                Span::styled("b", Style::default().fg(BLUE)),
-                sep(":bookmark"),
-            ]);
-        }
-        if state.active_tab == Tab::Sessions {
-            spans.extend([
-                sep(" "),
-                Span::styled("↵", Style::default().fg(BLUE)),
-                sep(":focus "),
-                Span::styled("␣", Style::default().fg(BLUE)),
-                sep(":expand"),
-            ]);
-        }
-        Line::from(spans)
+        Line::from(vec![busy])
     };
 
     frame.render_widget(Paragraph::new(line1), area);
