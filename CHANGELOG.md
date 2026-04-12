@@ -1,3 +1,10 @@
+## v0.4.1 (2026-04-11)
+
+### Fix
+
+- **ui**: align session cache numbering with display order (#11)
+- **ui**: dim all header elements when lonko loses focus (#10)
+
 ## v0.4.0 (2026-04-11)
 
 ### Feat
