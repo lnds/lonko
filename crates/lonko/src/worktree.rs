@@ -140,6 +140,108 @@ pub fn run(cwd: &str, branch: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Metadata for an open pull request associated with a branch.
+#[derive(Debug, Clone)]
+pub struct PrInfo {
+    pub number: u32,
+    pub title: String,
+    pub branch: String,
+}
+
+/// Query GitHub for an **open** PR whose head branch matches `branch`.
+/// Requires the `gh` CLI. Returns `None` when no open PR exists, `gh` is
+/// missing, or the repo has no GitHub remote.
+pub fn pr_for_branch(cwd: &str, branch: &str) -> Option<PrInfo> {
+    let output = Command::new("gh")
+        .args([
+            "pr", "list",
+            "--head", branch,
+            "--state", "open",
+            "--json", "number,title,headRefName",
+            "--jq", ".[0] | .number,.title,.headRefName",
+        ])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let mut lines = text.lines();
+    let number: u32 = lines.next()?.parse().ok()?;
+    let title = lines.next()?.to_string();
+    let head_branch = lines.next()?.to_string();
+    Some(PrInfo { number, title, branch: head_branch })
+}
+
+/// Create a worktree from a PR branch, open a tmux session, and launch claude.
+///
+/// Uses `gh pr checkout` semantics: fetches the remote branch so the local
+/// worktree tracks the PR head. Falls back to `worktree::run` if the branch
+/// is already available locally.
+pub fn run_from_pr(cwd: &str, pr: &PrInfo) -> anyhow::Result<()> {
+    let root = git_root(cwd)
+        .ok_or_else(|| anyhow::anyhow!("not a git repository: {cwd}"))?;
+
+    let repo_name = Path::new(&root)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("repo");
+
+    let safe_branch = sanitize_branch(&pr.branch);
+    let session_name = format!("{repo_name}-{safe_branch}");
+    let worktree_path = Path::new(&root)
+        .parent()
+        .unwrap_or(Path::new("/tmp"))
+        .join(&session_name);
+
+    let wt_str = worktree_path.to_string_lossy();
+
+    // Fetch the PR branch from origin so the worktree tracks upstream
+    let _ = Command::new("git")
+        .args(["-C", &root, "fetch", "origin", &pr.branch])
+        .status();
+
+    // Create worktree tracking the remote branch
+    let status = Command::new("git")
+        .args([
+            "-C", &root, "worktree", "add",
+            &wt_str, "-b", &pr.branch,
+            &format!("origin/{}", pr.branch),
+        ])
+        .status()?;
+    if !status.success() {
+        // Branch may already exist locally — try plain worktree add
+        let status = Command::new("git")
+            .args(["-C", &root, "worktree", "add", &wt_str, &pr.branch])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("git worktree add failed for PR #{} (branch '{}')", pr.number, pr.branch);
+        }
+    }
+
+    // Copy .claude config so the new worktree inherits project settings
+    copy_claude_config(&root, &worktree_path);
+
+    // Create tmux session in the worktree directory
+    tmux::create_session(&session_name, &wt_str)?;
+
+    // Show PR context before launching claude
+    let pr_msg = format!("echo '# PR #{}: {}' && claude", pr.number, pr.title.replace('\'', "'\\''"));
+    tmux::send_command(&session_name, &pr_msg)?;
+
+    // Switch to the new session
+    let _ = Command::new("tmux")
+        .args(["switch-client", "-t", &session_name])
+        .status();
+
+    Ok(())
+}
+
 /// Check if a directory is inside a git worktree (not the main repo).
 /// Compares --git-dir and --git-common-dir: if they differ, it's a linked worktree.
 pub fn is_worktree(cwd: &str) -> bool {

@@ -1007,6 +1007,9 @@ impl App {
             KeyCode::Char('g') => {
                 self.launch_worktree_prompt();
             }
+            KeyCode::Char('p') if self.state.active_tab == Tab::Agents => {
+                self.spawn_pr_worktree();
+            }
             // Permission shortcuts (y=yes/1, w=always/2, n=no/3)
             KeyCode::Char('y') => self.send_permission("1"),
             KeyCode::Char('w') => self.send_permission("2"),
@@ -1125,6 +1128,31 @@ impl App {
                 // Show error via tmux message since we can't easily display in the TUI
                 let _ = std::process::Command::new("tmux")
                     .args(["display-message", &format!("worktree: {e}")])
+                    .status();
+            }
+        });
+    }
+
+    /// Look up the PR for the selected agent's branch and create a worktree from it.
+    fn spawn_pr_worktree(&self) {
+        let Some(session) = self.state.selected_session() else { return };
+        let Some(branch) = session.branch.clone() else {
+            let _ = std::process::Command::new("tmux")
+                .args(["display-message", "pr-worktree: no branch detected for this agent"])
+                .status();
+            return;
+        };
+        let cwd = session.cwd.clone();
+        std::thread::spawn(move || {
+            let Some(pr) = crate::worktree::pr_for_branch(&cwd, &branch) else {
+                let _ = std::process::Command::new("tmux")
+                    .args(["display-message", &format!("pr-worktree: no open PR found for branch '{branch}'")])
+                    .status();
+                return;
+            };
+            if let Err(e) = crate::worktree::run_from_pr(&cwd, &pr) {
+                let _ = std::process::Command::new("tmux")
+                    .args(["display-message", &format!("pr-worktree: {e}")])
                     .status();
             }
         });
