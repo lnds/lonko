@@ -1089,6 +1089,8 @@ impl App {
         if len > 0 {
             self.state.selected = self.state.selected.min(len - 1);
         }
+        // Update cache immediately so `lonko focus N` reflects the change.
+        self.write_sessions_cache();
 
         // Resolve branch (fall back to live git) and main repo before moving into the closure.
         let branch = branch.or_else(|| crate::sources::transcript::git_branch(&cwd));
@@ -1178,7 +1180,7 @@ impl App {
     /// - ~/.cache/lonko-sessions: one pane_id per line (for `lonko focus N`)
     /// - ~/.cache/lonko-sessions-info: "N\tname\tcwd" per line (for shortcut-list.sh)
     fn write_sessions_cache(&self) {
-        let sessions: Vec<&crate::state::Session> = self.state.sessions.iter().collect();
+        let sessions = self.state.ordered_sessions();
 
         // Pane IDs file (for lonko focus N)
         // Write ALL sessions (one per line), ignoring any active search filter so that

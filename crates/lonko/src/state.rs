@@ -373,8 +373,21 @@ impl AppState {
                 .collect()
         };
 
-        let mains: Vec<&Session> = filtered.iter().copied().filter(|s| s.depth == 0).collect();
-        let subs: Vec<&Session> = filtered.iter().copied().filter(|s| s.depth > 0).collect();
+        Self::sort_sessions(filtered)
+    }
+
+    /// All sessions in canonical display order (grouped by repo, trunk first)
+    /// without any search filter applied. Used by `write_sessions_cache` so
+    /// that `lonko focus N` numbers always match the UI ordering.
+    pub fn ordered_sessions(&self) -> Vec<&Session> {
+        Self::sort_sessions(self.sessions.iter().collect())
+    }
+
+    /// Sort sessions: group by repo root, float trunk branches to the top
+    /// of each group, and nest subagents under their parent.
+    fn sort_sessions(sessions: Vec<&Session>) -> Vec<&Session> {
+        let mains: Vec<&Session> = sessions.iter().copied().filter(|s| s.depth == 0).collect();
+        let subs: Vec<&Session> = sessions.iter().copied().filter(|s| s.depth > 0).collect();
 
         // Linear-scan grouping: preserves first-seen order of keys, and the
         // insertion order of mains within each key. `None` (non-git mains,
@@ -405,7 +418,7 @@ impl AppState {
             group_mains.sort_by_key(|s| if is_trunk_branch(s.branch.as_deref()) { 0 } else { 1 });
         }
 
-        let mut result: Vec<&Session> = Vec::with_capacity(filtered.len());
+        let mut result: Vec<&Session> = Vec::with_capacity(sessions.len());
         for (_, group_mains) in &named {
             for main in group_mains {
                 result.push(main);
@@ -963,6 +976,37 @@ mod tests {
         // Visible order of groups is first-seen: b1 was inserted before
         // a1, so beta comes first — but a1 still owns its subagent.
         assert_eq!(ids, vec!["b1", "a1", "s1"]);
+    }
+
+    #[test]
+    fn ordered_sessions_matches_visible_without_search() {
+        let mut state = AppState::default();
+        state.sessions = vec![
+            main_with_repo_branch("feat", "/r/alpha", "lonko-6"),
+            main_with_repo_branch("trunk", "/r/alpha", "main"),
+            main_with_repo("b1", Some("/r/beta")),
+        ];
+        let visible: Vec<&str> = state.visible_sessions().iter().map(|s| s.id.as_str()).collect();
+        let ordered: Vec<&str> = state.ordered_sessions().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(visible, ordered);
+        // trunk floated to top of alpha group
+        assert_eq!(ordered, vec!["trunk", "feat", "b1"]);
+    }
+
+    #[test]
+    fn ordered_sessions_ignores_search_filter() {
+        let mut state = AppState::default();
+        state.sessions = vec![
+            main_with_repo_branch("feat", "/r/alpha", "lonko-6"),
+            main_with_repo_branch("trunk", "/r/alpha", "main"),
+        ];
+        state.search_query = "feat".into();
+        // visible_sessions respects the filter
+        let visible: Vec<&str> = state.visible_sessions().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(visible, vec!["feat"]);
+        // ordered_sessions ignores it
+        let ordered: Vec<&str> = state.ordered_sessions().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ordered, vec!["trunk", "feat"]);
     }
 
     #[test]
