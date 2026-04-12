@@ -1084,11 +1084,15 @@ impl App {
 
         // Remove from lonko state
         self.state.sessions.retain(|s| s.id != session_id);
-        // Clamp selection
-        let len = self.state.sessions.len();
-        if len > 0 {
-            self.state.selected = self.state.selected.min(len - 1);
+        // Clamp selection against the visible list (which may be filtered).
+        let vlen = self.state.visible_len();
+        if vlen > 0 {
+            self.state.selected = self.state.selected.min(vlen - 1);
+        } else {
+            self.state.selected = 0;
         }
+        // Update cache immediately so `lonko focus N` reflects the change.
+        self.write_sessions_cache();
 
         // Resolve branch (fall back to live git) and main repo before moving into the closure.
         let branch = branch.or_else(|| crate::sources::transcript::git_branch(&cwd));
@@ -1178,11 +1182,11 @@ impl App {
     /// - ~/.cache/lonko-sessions: one pane_id per line (for `lonko focus N`)
     /// - ~/.cache/lonko-sessions-info: "N\tname\tcwd" per line (for shortcut-list.sh)
     fn write_sessions_cache(&self) {
-        let sessions: Vec<&crate::state::Session> = self.state.sessions.iter().collect();
+        let sessions = self.state.ordered_sessions();
 
         // Pane IDs file (for lonko focus N)
-        // Write ALL sessions (one per line), ignoring any active search filter so that
-        // `lonko focus N` always maps to the canonical session order.
+        // Write ALL sessions (one per line) in canonical display order
+        // (grouped by repo, trunk first) so `lonko focus N` matches the UI.
         let pane_content: String = sessions
             .iter()
             .map(|s| {
@@ -1207,9 +1211,11 @@ impl App {
     }
 
 
-    /// Focus the Nth visible session (1-indexed) by switching the tmux client.
+    /// Focus the Nth session (1-indexed) in canonical display order by switching
+    /// the tmux client.  Uses `ordered_sessions()` so the numbering matches
+    /// the cache file read by `lonko focus N`.
     fn focus_nth(&mut self, n: usize) {
-        let sessions = self.state.visible_sessions();
+        let sessions = self.state.ordered_sessions();
         let Some(session) = sessions.get(n.saturating_sub(1)) else { return };
         let pid = session.pid;
         let session_id = session.id.clone();
@@ -1219,7 +1225,12 @@ impl App {
             if let Some(s) = self.state.sessions.iter_mut().find(|s| s.id == session_id) {
                 s.tmux_pane = Some(pane.clone());
             }
-            self.state.selected = n - 1;
+            // Set selected to the matching index in the visible list (which
+            // may differ from the ordered list when a search filter is active).
+            let vis = self.state.visible_sessions();
+            self.state.selected = vis.iter()
+                .position(|s| s.id == session_id)
+                .unwrap_or(0);
             write_no_follow_sentinel();
             let _ = tmux::select_pane(pane);
             let _ = tmux::focus_pane(pane);
