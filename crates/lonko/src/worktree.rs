@@ -547,8 +547,24 @@ mod tests {
 
     #[test]
     fn delete_remote_branch_nonexistent_returns_err() {
-        let repo = git_root(env!("CARGO_MANIFEST_DIR")).expect("git repo");
-        assert!(delete_remote_branch(&repo, "nonexistent-branch-xyz-999").is_err());
+        // Use a local bare repo as "origin" so the test never hits the network.
+        let tmp = std::env::temp_dir().join("lonko-test-delete-remote");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let bare = tmp.join("remote.git");
+        let repo = tmp.join("repo");
+        assert!(Command::new("git").args(["init", "--bare"]).arg(&bare).output().unwrap().status.success());
+        assert!(Command::new("git").args(["init"]).arg(&repo).output().unwrap().status.success());
+        assert!(Command::new("git").args(["-C", repo.to_str().unwrap(), "remote", "add", "origin", bare.to_str().unwrap()]).output().unwrap().status.success());
+        // Need at least one commit so git push has something to work with.
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        assert!(Command::new("git").args(["-C", repo.to_str().unwrap(), "add", "."]).output().unwrap().status.success());
+        assert!(Command::new("git").args(["-C", repo.to_str().unwrap(), "commit", "-m", "init"]).output().unwrap().status.success());
+        assert!(Command::new("git").args(["-C", repo.to_str().unwrap(), "push", "origin", "HEAD"]).output().unwrap().status.success());
+
+        assert!(delete_remote_branch(repo.to_str().unwrap(), "nonexistent-branch-xyz-999").is_err());
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
