@@ -29,8 +29,20 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         Color::Rgb(122, 162, 247) // visible blue when lonko has focus
     };
 
-    let agents_color = if state.active_tab == Tab::Agents { Color::Rgb(122, 162, 247) } else { Color::Rgb(169, 177, 214) };
-    let sessions_color = if state.active_tab == Tab::Sessions { Color::Rgb(122, 162, 247) } else { Color::Rgb(169, 177, 214) };
+    let agents_color = if !state.focused {
+        Color::Rgb(59, 66, 97)
+    } else if state.active_tab == Tab::Agents {
+        Color::Rgb(122, 162, 247)
+    } else {
+        Color::Rgb(169, 177, 214)
+    };
+    let sessions_color = if !state.focused {
+        Color::Rgb(59, 66, 97)
+    } else if state.active_tab == Tab::Sessions {
+        Color::Rgb(122, 162, 247)
+    } else {
+        Color::Rgb(169, 177, 214)
+    };
     let tab_titles = vec![
         Line::from(vec![
             Span::styled("A", Style::default().fg(agents_color).add_modifier(Modifier::UNDERLINED)),
@@ -54,25 +66,29 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     } else {
         Color::Rgb(59, 66, 97)
     };
+    let dim = Color::Rgb(59, 66, 97);
     let mut title_spans = vec![
         Span::styled(" lonko ", Style::default().fg(title_color).add_modifier(bold)),
     ];
     if running > 0 {
+        let fg = if state.focused { Color::Rgb(158, 206, 106) } else { dim };
         title_spans.push(Span::styled(
             format!("◉ {} ", running),
-            Style::default().fg(Color::Rgb(158, 206, 106)).add_modifier(bold),
+            Style::default().fg(fg).add_modifier(bold),
         ));
     }
     if waiting > 0 {
+        let fg = if state.focused { Color::Rgb(255, 139, 61) } else { dim };
         title_spans.push(Span::styled(
             format!("⚠ {} ", waiting),
-            Style::default().fg(Color::Rgb(255, 139, 61)).add_modifier(bold),
+            Style::default().fg(fg).add_modifier(bold),
         ));
     }
     if waiting_input > 0 {
+        let fg = if state.focused { Color::Rgb(224, 175, 104) } else { dim };
         title_spans.push(Span::styled(
             format!("◐ {} ", waiting_input),
-            Style::default().fg(Color::Rgb(224, 175, 104)).add_modifier(bold),
+            Style::default().fg(fg).add_modifier(bold),
         ));
     }
 
@@ -91,7 +107,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
                     .alignment(Alignment::Right),
                 ),
         )
-        .highlight_style(Style::default().fg(Color::Rgb(122, 162, 247)).add_modifier(Modifier::BOLD))
+        .highlight_style(Style::default().fg(if state.focused { Color::Rgb(122, 162, 247) } else { dim }).add_modifier(Modifier::BOLD))
         .divider(Span::raw(" │ "));
 
     frame.render_widget(tabs, area);
