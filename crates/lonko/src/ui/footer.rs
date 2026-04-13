@@ -53,7 +53,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             sep(":no"),
         ])
     } else {
-        Line::from(vec![busy])
+        Line::from(vec![
+            busy,
+            sep("  "),
+            Span::styled("?", Style::default().fg(BLUE)),
+            sep(":help"),
+        ])
     };
 
     frame.render_widget(Paragraph::new(line1), area);

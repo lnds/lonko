@@ -246,6 +246,8 @@ pub struct AppState {
     pub bookmark_mode: bool,
     /// Bookmark note text being edited.
     pub bookmark_input: String,
+    /// Whether the help popup is visible.
+    pub show_help: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -345,6 +347,7 @@ impl Default for AppState {
             bookmarks: HashMap::new(),
             bookmark_mode: false,
             bookmark_input: String::new(),
+            show_help: false,
         }
     }
 }

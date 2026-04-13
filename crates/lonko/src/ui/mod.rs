@@ -1,6 +1,7 @@
 mod detail;
 mod footer;
 mod header;
+mod help;
 mod list;
 pub(crate) mod tmux_sessions;
 
@@ -35,4 +36,8 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         }
     }
     footer::render(frame, chunks[2], state);
+
+    if state.show_help {
+        help::render(frame);
+    }
 }

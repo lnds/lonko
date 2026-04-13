@@ -898,6 +898,16 @@ impl App {
             }
             return Ok(false);
         }
+        if self.state.show_help {
+            match key.code {
+                KeyCode::Esc
+                | KeyCode::Char('?')
+                | KeyCode::Char('h')
+                | KeyCode::Char('q') => self.state.show_help = false,
+                _ => {}
+            }
+            return Ok(false);
+        }
         match key.code {
             KeyCode::Esc => {
                 if self.state.active_tab == Tab::Sessions && self.state.tmux_expanded {
@@ -916,6 +926,7 @@ impl App {
                 }
             }
             KeyCode::Char('/') => { self.state.search_mode = true; }
+            KeyCode::Char('?') => { self.state.show_help = true; }
             KeyCode::Char('d') => {
                 self.state.show_detail = !self.state.show_detail;
                 if self.state.show_detail { self.refresh_selected_transcript(); }
@@ -945,6 +956,9 @@ impl App {
                     self.state.select_prev();
                     if self.state.show_detail { self.refresh_selected_transcript(); }
                 }
+            }
+            KeyCode::Char('h') if self.state.active_tab == Tab::Agents => {
+                self.state.show_help = true;
             }
             KeyCode::Char('h') | KeyCode::Left
                 if self.state.active_tab == Tab::Sessions =>
