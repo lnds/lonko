@@ -1029,10 +1029,16 @@ impl App {
             KeyCode::Char('w') => self.send_permission("2"),
             KeyCode::Char('n') => self.send_permission("3"),
             KeyCode::Char('x') if !self.state.has_waiting() => {
-                self.kill_and_remove_worktree();
+                match self.state.active_tab {
+                    Tab::Agents  => self.kill_and_remove_worktree(),
+                    Tab::Sessions => self.kill_selected_tmux_session(),
+                }
             }
             KeyCode::Char('X') if !self.state.has_waiting() => {
-                self.kill_selected_agent();
+                match self.state.active_tab {
+                    Tab::Agents  => self.kill_selected_agent(),
+                    Tab::Sessions => self.kill_selected_tmux_session(),
+                }
             }
             KeyCode::Char(c @ '1'..='9') => {
                 let n = (c as u8 - b'0') as usize;
@@ -1043,18 +1049,31 @@ impl App {
         Ok(false)
     }
 
+    /// Check whether `pane` belongs to the same tmux session as lonko.
+    /// Returns `true` when the pane should NOT be killed.
+    fn is_own_tmux_session(&self, pane: Option<&str>) -> bool {
+        let Some(own) = &self.state.own_pane else { return false };
+        let Some(p) = pane else { return false };
+        // Fast path: same pane ID.
+        if own == p { return true; }
+        // Slow path: resolve both to their tmux session name.
+        let own_sess = tmux_session_for_pane(own);
+        let tgt_sess = tmux_session_for_pane(p);
+        matches!((own_sess, tgt_sess), (Some(a), Some(b)) if a == b)
+    }
+
     /// Soft kill: send Ctrl-C to the selected agent's tmux pane.
     fn kill_selected_agent(&mut self) {
         let Some(session) = self.state.selected_session() else { return };
         if matches!(session.status, SessionStatus::Completed) { return; }
-        // Never kill the session lonko is running in
-        if let (Some(own), Some(sp)) = (&self.state.own_pane, &session.tmux_pane) {
-            if own == sp { return; }
-        }
         let pid = session.pid;
         let session_id = session.id.clone();
         let pane = session.tmux_pane.clone()
             .or_else(|| tmux::find_pane_for_pid(pid));
+        // Never send Ctrl-C to lonko's own pane.
+        if self.is_own_tmux_session(pane.as_deref()) {
+            return;
+        }
         if let Some(ref p) = pane {
             let _ = tmux::send_ctrl_c(p);
         }
@@ -1069,17 +1088,20 @@ impl App {
     fn kill_and_remove_worktree(&mut self) {
         let Some(session) = self.state.selected_session() else { return };
 
-        // Never kill the session lonko is running in
-        if let (Some(own), Some(sp)) = (&self.state.own_pane, &session.tmux_pane) {
-            if own == sp { return; }
-        }
-
         let cwd = session.cwd.clone();
         let pid = session.pid;
         let session_id = session.id.clone();
         let branch = session.branch.clone();
         let pane = session.tmux_pane.clone()
             .or_else(|| tmux::find_pane_for_pid(pid));
+
+        // Never kill the tmux session lonko is running in.
+        // Compare at the tmux-session level (not just pane ID) so the guard
+        // still works when session.tmux_pane is None and the pane was resolved
+        // via find_pane_for_pid.
+        if self.is_own_tmux_session(pane.as_deref()) {
+            return;
+        }
 
         if !crate::worktree::is_worktree(&cwd) {
             // Not a worktree — fall back to soft kill
@@ -1144,6 +1166,26 @@ impl App {
                     tmux::display_message(&msg);
                 }
             }
+        });
+    }
+
+    /// Kill the tmux session selected in the Sessions tab.
+    /// Refuses to kill the session lonko itself is running in.
+    fn kill_selected_tmux_session(&self) {
+        let Some(ts) = self.state.selected_tmux_session() else { return };
+
+        // Never kill lonko's own tmux session.
+        if let Some(own_pane) = &self.state.own_pane {
+            if let Some(own_sess) = tmux_session_for_pane(own_pane) {
+                if own_sess == ts.name {
+                    return;
+                }
+            }
+        }
+
+        let name = ts.name.clone();
+        std::thread::spawn(move || {
+            let _ = tmux::kill_session(&name);
         });
     }
 
