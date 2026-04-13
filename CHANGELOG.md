@@ -1,3 +1,14 @@
+## v0.5.0 (2026-04-12)
+
+### Feat
+
+- **ui**: add help popup with keybinding reference
+
+### Fix
+
+- **tmux**: kill window instead of session when pressing x
+- **ui**: make x key respect active tab and fix own-session guard
+
 ## v0.4.1 (2026-04-11)
 
 ### Fix
