@@ -1114,9 +1114,8 @@ impl App {
             let _ = tmux::send_ctrl_c(p);
         }
 
-        // Resolve tmux session name before removing from state
-        let tmux_session_name = pane.as_deref()
-            .and_then(tmux::tmux_session_for_pane);
+        // Keep the pane ID so we can kill just its window (not the whole session).
+        let target_pane = pane.clone();
 
         // Remove from lonko state
         self.state.sessions.retain(|s| s.id != session_id);
@@ -1134,13 +1133,13 @@ impl App {
         let branch = branch.or_else(|| crate::sources::transcript::git_branch(&cwd));
         let main_repo = crate::worktree::repo_common_root(&cwd);
 
-        // Background cleanup: kill tmux session + remove worktree + clean merged branch.
-        // Bail if we couldn't resolve the tmux session — worktree and session
+        // Background cleanup: kill tmux window + remove worktree + clean merged branch.
+        // Bail if we couldn't resolve the pane — worktree and window
         // should live and die together.
-        let Some(tmux_session_name) = tmux_session_name else { return };
+        let Some(target_pane) = target_pane else { return };
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(500));
-            let _ = tmux::kill_session(&tmux_session_name);
+            let _ = tmux::kill_window(&target_pane);
             if let Err(e) = crate::worktree::remove(&cwd) {
                 tmux::display_message(&format!("worktree remove: {e}"));
                 return;

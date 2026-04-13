@@ -342,6 +342,17 @@ pub fn kill_session(session_name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Kill the tmux window that contains `pane_id`.
+pub fn kill_window(pane_id: &str) -> anyhow::Result<()> {
+    let status = Command::new("tmux")
+        .args(["kill-window", "-t", pane_id])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("tmux kill-window failed for pane {pane_id}");
+    }
+    Ok(())
+}
+
 /// Show a message in the tmux status line. Fire-and-forget: ignores errors.
 pub fn display_message(msg: &str) {
     let _ = Command::new("tmux")
