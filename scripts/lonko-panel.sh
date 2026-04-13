@@ -69,5 +69,5 @@ else
     [ -n "$TAB_ARG" ] && LONKO_CMD="lonko --tab $TAB_ARG"
 
     tmux kill-pane -t "$TRAY_PANE"
-    tmux split-window -h -f -l 22% -t "$CURRENT_WIN" -d "$LONKO_CMD"
+    tmux split-window -h -f -l 25% -t "$CURRENT_WIN" -d "$LONKO_CMD"
 fi

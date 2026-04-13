@@ -50,5 +50,5 @@ if [ -f "$OLD_LAYOUT_FILE" ]; then
     rm -f "$OLD_LAYOUT_FILE"
 fi
 
-# Create a new lonko in the current window (full-height column on the right, 22%)
-tmux split-window -h -f -l 22% -t "$CURRENT_WIN" -d "lonko"
+# Create a new lonko in the current window (full-height column on the right, 25%)
+tmux split-window -h -f -l 25% -t "$CURRENT_WIN" -d "lonko"
