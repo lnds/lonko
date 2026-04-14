@@ -5,6 +5,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
 };
+use std::collections::HashMap;
 use unicode_width::UnicodeWidthStr;
 use crate::state::{AppState, Session, SessionStatus};
 
@@ -112,9 +113,15 @@ const SEP_HEIGHT: u16 = 1;
 /// One-line group header drawn above the first card of a multi-agent group.
 const GROUP_HEADER_HEIGHT: u16 = 1;
 
-/// Card height for a session (main=5, sub=3)
-fn card_height(session: &Session) -> u16 {
-    if session.is_subagent() { SUB_CARD_HEIGHT } else { CARD_HEIGHT }
+/// Card height for a session: main=5 (6 when bookmarked), sub=3.
+fn card_height(session: &Session, bookmarks: &HashMap<String, String>) -> u16 {
+    if session.is_subagent() {
+        SUB_CARD_HEIGHT
+    } else if bookmarks.contains_key(&session.cwd) {
+        CARD_HEIGHT + 1
+    } else {
+        CARD_HEIGHT
+    }
 }
 
 /// For each session in `visible`, whether a group header should be drawn
@@ -148,18 +155,18 @@ fn compute_header_flags(visible: &[&Session]) -> Vec<bool> {
 
 /// Total height for the card at `visible[idx]`, including the group header
 /// when `header_flags[idx]` is set.
-fn slot_height(visible: &[&Session], idx: usize, header_flags: &[bool]) -> u16 {
+fn slot_height(visible: &[&Session], idx: usize, header_flags: &[bool], bookmarks: &HashMap<String, String>) -> u16 {
     let hdr = if header_flags[idx] { GROUP_HEADER_HEIGHT } else { 0 };
-    hdr + card_height(visible[idx])
+    hdr + card_height(visible[idx], bookmarks)
 }
 
 /// Compute how many cards fit from `start` in `sessions` given `avail` lines,
 /// accounting for any group headers rendered inline.
-fn cards_fitting(sessions: &[&Session], start: usize, avail: u16, header_flags: &[bool]) -> usize {
+fn cards_fitting(sessions: &[&Session], start: usize, avail: u16, header_flags: &[bool], bookmarks: &HashMap<String, String>) -> usize {
     let mut used = 0u16;
     let mut count = 0;
     for i in start..sessions.len() {
-        let h = slot_height(sessions, i, header_flags) + if count > 0 { SEP_HEIGHT } else { 0 };
+        let h = slot_height(sessions, i, header_flags, bookmarks) + if count > 0 { SEP_HEIGHT } else { 0 };
         if used + h > avail { break; }
         used += h;
         count += 1;
@@ -233,7 +240,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let header_flags = compute_header_flags(&visible);
 
     // Variable-height cards: compute how many fit from the scroll offset
-    let cards_visible = cards_fitting(&visible, 0, list_area.height, &header_flags);
+    let cards_visible = cards_fitting(&visible, 0, list_area.height, &header_flags, &state.bookmarks);
     let cards_visible = cards_visible.min(total);
 
     // Scroll offset: keep selected roughly centered, clamped to valid range.
@@ -248,7 +255,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
 
     // Recompute visible cards from the actual scroll position
     let cards_visible =
-        cards_fitting(&visible, scroll, list_area.height, &header_flags).min(total - scroll);
+        cards_fitting(&visible, scroll, list_area.height, &header_flags, &state.bookmarks).min(total - scroll);
     let page = &visible[scroll..scroll + cards_visible];
 
     // Pre-assign icons for main agents only (subagents don't get icons)
@@ -300,7 +307,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         } else {
             None
         };
-        card_constraints.push(Constraint::Length(card_height(s)));
+        card_constraints.push(Constraint::Length(card_height(s, &state.bookmarks)));
         let card_idx = card_constraints.len() - 1;
         slot_chunks.push((header_idx, card_idx));
         if i < page.len() - 1 {
@@ -478,7 +485,7 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
     // Lines 3-5 indent (4 spaces) aligns with project name: 3 (avatar) + 1 (space)
     let indent = "    ";
 
-    // Line 2: number below avatar + prompt text
+    // Line 2: number below avatar + prompt text (always shown)
     // The number occupies the avatar column (" N "), then the prompt follows.
     let max_prompt = area.width.saturating_sub(6) as usize;
     let num_span = if position <= 9 {
@@ -486,20 +493,7 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
     } else {
         Span::raw("    ")
     };
-    let prompt_line = if let Some(note) = bookmark_note {
-        let max_note = max_prompt.saturating_sub(4); // room for "📌 "
-        let truncated = if note.chars().count() > max_note {
-            let s: String = note.chars().take(max_note.saturating_sub(1)).collect();
-            format!("{s}…")
-        } else {
-            note.to_string()
-        };
-        Line::from(vec![
-            num_span,
-            Span::styled("🔖 ", Style::default().fg(BOOKMARK)),
-            Span::styled(truncated, Style::default().fg(TEXT)),
-        ])
-    } else if let Some(p) = &session.last_prompt {
+    let prompt_line = if let Some(p) = &session.last_prompt {
         let char_count = p.chars().count();
         let truncated = if char_count > max_prompt {
             let s: String = p.chars().take(max_prompt.saturating_sub(1)).collect();
@@ -514,6 +508,22 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
     } else {
         Line::from(vec![num_span])
     };
+
+    // Optional bookmark line (only rendered when a note is set)
+    let bookmark_line = bookmark_note.map(|note| {
+        let max_note = area.width.saturating_sub(8) as usize; // room for indent + "🔖 "
+        let truncated = if note.chars().count() > max_note {
+            let s: String = note.chars().take(max_note.saturating_sub(1)).collect();
+            format!("{s}…")
+        } else {
+            note.to_string()
+        };
+        Line::from(vec![
+            Span::raw(indent),
+            Span::styled("🔖 ", Style::default().fg(BOOKMARK)),
+            Span::styled(truncated, Style::default().fg(TEXT)),
+        ])
+    });
 
     // Line 3: spinner (when running) + status label + elapsed
     let is_running = matches!(&session.status, SessionStatus::Running | SessionStatus::RunningTool(_));
@@ -570,7 +580,11 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
         Span::styled("░".repeat(empty), Style::default().fg(BAR_BG)),
     ]);
 
-    let content = vec![name_line, prompt_line, status_line, info_line, progress_line];
+    let mut content = vec![name_line, prompt_line];
+    if let Some(bm) = bookmark_line {
+        content.push(bm);
+    }
+    content.extend([status_line, info_line, progress_line]);
 
     // Left-only border: colored stripe acting as visual identity + selection indicator.
     // No box border — cleaner look, cards are separated by blank lines.

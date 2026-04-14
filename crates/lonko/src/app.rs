@@ -260,7 +260,13 @@ impl App {
         let mut y_acc: u16 = 0;
         let mut card_idx: Option<usize> = None;
         for (i, s) in visible[scroll..].iter().enumerate() {
-            let ch = if s.is_subagent() { 3u16 } else { 5u16 };
+            let ch = if s.is_subagent() {
+                3u16
+            } else if self.state.bookmarks.contains_key(&s.cwd) {
+                6u16
+            } else {
+                5u16
+            };
             if click_y >= y_acc && click_y < y_acc + ch {
                 card_idx = Some(i);
                 break;
