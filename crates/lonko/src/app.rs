@@ -244,28 +244,37 @@ impl App {
             return;
         }
 
-        // Agents tab: variable-height cards (main=5+1, sub=3+1), starts at y=3
+        // Agents tab: variable-height cards, starts at y=3
         let visible = self.state.visible_sessions();
         let total = visible.len();
         if total == 0 { return; }
 
         let list_h = h.saturating_sub(3 + 1);
-        // Approximate cards visible and scroll using uniform stride as heuristic
-        let approx_visible = ((list_h + 1) / 6).max(1) as usize;
-        let cards_visible = approx_visible.min(total);
-        let scroll = compute_scroll_offset(self.state.selected, total, cards_visible);
+        let header_flags = ui::list::compute_header_flags(&visible);
+        let (scroll, cards_visible) = ui::list::compute_scroll(
+            &visible, self.state.selected, list_h, &header_flags, &self.state.bookmarks,
+        );
 
-        // Linear scan to find which card was clicked based on row offset from y=3
+        // Linear scan to find which card was clicked based on row offset from y=3.
+        // Must mirror the render layout: header + card + separator (between cards only).
         let click_y = row - 3;
         let mut y_acc: u16 = 0;
         let mut card_idx: Option<usize> = None;
-        for (i, s) in visible[scroll..].iter().enumerate() {
-            let ch = if s.is_subagent() { 3u16 } else { 5u16 };
+        let page_end = (scroll + cards_visible).min(visible.len());
+        for (i, s) in visible[scroll..page_end].iter().enumerate() {
+            let global = scroll + i;
+            if i > 0 {
+                y_acc += 1; // separator between cards (not before first)
+            }
+            if header_flags[global] {
+                y_acc += ui::list::GROUP_HEADER_HEIGHT;
+            }
+            let ch = ui::list::card_height(s, &self.state.bookmarks);
             if click_y >= y_acc && click_y < y_acc + ch {
                 card_idx = Some(i);
                 break;
             }
-            y_acc += ch + 1; // card height + separator
+            y_acc += ch;
         }
 
         let global_idx = match card_idx {
