@@ -685,7 +685,7 @@ impl App {
 
         // Desktop notification when session needs attention and Ghostty is not in focus
         if !ghostty::has_focus() {
-            notify_if_needed(&session.project_name, &session.status);
+            notify_if_needed(session.display_name(), &session.status);
         }
     }
 
@@ -1266,7 +1266,7 @@ impl App {
         let info_content: String = sessions
             .iter()
             .enumerate()
-            .map(|(i, s)| format!("{}\t{}\t{}\n", i + 1, s.project_name, s.cwd))
+            .map(|(i, s)| format!("{}\t{}\t{}\n", i + 1, s.display_name(), s.cwd))
             .collect();
         let info_path = dirs::cache_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))

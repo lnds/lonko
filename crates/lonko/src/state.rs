@@ -185,6 +185,39 @@ impl Session {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "ungrouped".to_string())
     }
+
+    /// Display name for this session. For grouped worktree agents (those
+    /// with a `repo_root`), derives a short name from the branch:
+    ///   - takes the last `/`-separated segment of the branch name
+    ///   - strips the repo group prefix (+ hyphen) if present
+    /// Falls back to `project_name` when there is no branch or repo_root.
+    ///
+    /// Examples (group = "lonko"):
+    ///   "feat/toki-24/new-agent" → "new-agent"
+    ///   "lonko-3-new-agent"      → "3-new-agent"
+    ///   "main"                   → "main"
+    pub fn display_name(&self) -> &str {
+        if let (Some(branch), Some(repo_root)) = (&self.branch, &self.repo_root) {
+            let tail = branch.rsplit('/').next().unwrap_or(branch);
+            let group = std::path::Path::new(repo_root.as_str())
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            // Strip "<group>-" prefix from the tail if present.
+            let prefix_len = group.len() + 1; // +1 for '-'
+            let tail_start = branch.len() - tail.len();
+            if tail.len() > prefix_len
+                && tail.starts_with(group)
+                && tail.as_bytes()[group.len()] == b'-'
+            {
+                &branch[tail_start + prefix_len..]
+            } else {
+                &branch[tail_start..]
+            }
+        } else {
+            &self.project_name
+        }
+    }
 }
 
 // ── Bookmark persistence ──────────────────────────────────────────────────────
@@ -366,10 +399,11 @@ impl AppState {
             self.sessions
                 .iter()
                 .filter(|s| {
-                    s.project_name.to_lowercase().contains(&q)
+                    s.display_name().to_lowercase().contains(&q)
+                        || s.project_name.to_lowercase().contains(&q)
                         || s.parent_id.as_ref().is_some_and(|pid| {
                             self.sessions.iter().any(|p| {
-                                p.id == *pid && p.project_name.to_lowercase().contains(&q)
+                                p.id == *pid && p.display_name().to_lowercase().contains(&q)
                             })
                         })
                 })
@@ -1524,5 +1558,52 @@ mod tests {
 
         state.try_apply_focus_hint(None);
         assert_eq!(state.focus_pane.as_deref(), Some("%5")); // not consumed
+    }
+
+    // ── display_name tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn display_name_falls_back_to_project_name_without_repo_root() {
+        let s = Session::new("id".into(), 0, "/home/user/my-app".into());
+        assert_eq!(s.display_name(), "my-app");
+    }
+
+    #[test]
+    fn display_name_falls_back_to_project_name_without_branch() {
+        let mut s = Session::new("id".into(), 0, "/home/user/my-app".into());
+        s.repo_root = Some("/home/user/my-app".into());
+        assert_eq!(s.display_name(), "my-app");
+    }
+
+    #[test]
+    fn display_name_uses_branch_tail_for_grouped_session() {
+        let s = main_with_repo_branch("id", "/r/lonko", "feat/toki-24/new-agent");
+        assert_eq!(s.display_name(), "new-agent");
+    }
+
+    #[test]
+    fn display_name_strips_group_prefix_from_branch() {
+        let s = main_with_repo_branch("id", "/r/lonko", "lonko-3-new-agent");
+        assert_eq!(s.display_name(), "3-new-agent");
+    }
+
+    #[test]
+    fn display_name_keeps_trunk_branch_as_is() {
+        let s = main_with_repo_branch("id", "/r/lonko", "main");
+        assert_eq!(s.display_name(), "main");
+    }
+
+    #[test]
+    fn display_name_no_strip_when_prefix_is_entire_tail() {
+        // Branch = "lonko" and group = "lonko" — should NOT strip because
+        // there's nothing after the prefix+dash.
+        let s = main_with_repo_branch("id", "/r/lonko", "lonko");
+        assert_eq!(s.display_name(), "lonko");
+    }
+
+    #[test]
+    fn display_name_slashed_branch_with_group_prefix() {
+        let s = main_with_repo_branch("id", "/r/lonko", "feat/lonko-42-fix");
+        assert_eq!(s.display_name(), "42-fix");
     }
 }
