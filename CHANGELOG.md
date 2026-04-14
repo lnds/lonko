@@ -1,3 +1,9 @@
+## v0.7.0 (2026-04-13)
+
+### Feat
+
+- **ui**: add new agent creation flow via popup (LONKO-3)
+
 ## v0.6.1 (2026-04-13)
 
 ### Fix
