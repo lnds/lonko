@@ -119,8 +119,8 @@ pub struct App {
     pub state: AppState,
     /// Channel sender stored so handle_event can trigger scans from the tick handler.
     scan_tx: Option<tokio::sync::mpsc::UnboundedSender<Event>>,
-    /// Last mouse click: (row, instant) for double-click detection.
-    last_click: Option<(u16, std::time::Instant)>,
+    /// Last mouse click: (tab, global_idx, instant) for double-click detection.
+    last_click: Option<(Tab, usize, std::time::Instant)>,
     /// Monotonic counter shared with pending focus tasks; increment to cancel stale spawns.
     focus_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
@@ -285,14 +285,14 @@ impl App {
             return;
         }
 
-        // Double-click detection: two clicks on the same row within 400ms → focus
+        // Double-click detection: two clicks on the same card within 400ms → focus
         let now = std::time::Instant::now();
         let is_double = self.last_click
             .as_ref()
-            .is_some_and(|(last_row, last_time)| {
-                *last_row == row && now.duration_since(*last_time).as_millis() < 400
+            .is_some_and(|(last_tab, last_idx, last_time)| {
+                *last_tab == Tab::Agents && *last_idx == global_idx && now.duration_since(*last_time).as_millis() < 400
             });
-        self.last_click = Some((row, now));
+        self.last_click = Some((Tab::Agents, global_idx, now));
 
         if is_double {
             self.state.selected = global_idx;
@@ -364,14 +364,14 @@ impl App {
 
         let row_within_card = row_in_list - card_row_start;
 
-        // Double-click detection: two clicks on the same row within 400ms.
+        // Double-click detection: two clicks on the same card within 400ms.
         let now = std::time::Instant::now();
         let is_double = self.last_click
             .as_ref()
-            .is_some_and(|(last_row, last_time)| {
-                *last_row == row && now.duration_since(*last_time).as_millis() < 400
+            .is_some_and(|(last_tab, last_idx, last_time)| {
+                *last_tab == Tab::Sessions && *last_idx == global_idx && now.duration_since(*last_time).as_millis() < 400
             });
-        self.last_click = Some((row, now));
+        self.last_click = Some((Tab::Sessions, global_idx, now));
 
         let is_selected = global_idx == self.state.tmux_selected;
         let is_expanded = is_selected && self.state.tmux_expanded;
