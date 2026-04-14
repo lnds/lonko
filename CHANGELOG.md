@@ -1,3 +1,9 @@
+## v0.10.1 (2026-04-13)
+
+### Fix
+
+- **ui**: compact help popup for narrow sidebar panels
+
 ## v0.10.0 (2026-04-13)
 
 ### Feat
