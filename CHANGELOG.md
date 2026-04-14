@@ -1,3 +1,12 @@
+## v0.5.2 (2026-04-13)
+
+### Fix
+
+- **ui**: guard compute_scroll against zero-height terminal
+- **ui**: unify scroll and hit-test logic between render and mouse handler
+- **ui**: align mouse hit-testing with render layout for agent cards
+- **ui**: show bookmark and prompt simultaneously on agent cards
+
 ## v0.5.1 (2026-04-13)
 
 ### Fix
