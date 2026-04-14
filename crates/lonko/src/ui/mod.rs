@@ -2,7 +2,7 @@ mod detail;
 mod footer;
 mod header;
 mod help;
-mod list;
+pub(crate) mod list;
 pub(crate) mod tmux_sessions;
 
 use ratatui::Frame;

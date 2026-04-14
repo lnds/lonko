@@ -111,10 +111,10 @@ const CARD_HEIGHT: u16 = 5;
 const SUB_CARD_HEIGHT: u16 = 3;
 const SEP_HEIGHT: u16 = 1;
 /// One-line group header drawn above the first card of a multi-agent group.
-const GROUP_HEADER_HEIGHT: u16 = 1;
+pub(crate) const GROUP_HEADER_HEIGHT: u16 = 1;
 
 /// Card height for a session: main=5 (6 when bookmarked), sub=3.
-fn card_height(session: &Session, bookmarks: &HashMap<String, String>) -> u16 {
+pub(crate) fn card_height(session: &Session, bookmarks: &HashMap<String, String>) -> u16 {
     if session.is_subagent() {
         SUB_CARD_HEIGHT
     } else if bookmarks.contains_key(&session.cwd) {
@@ -131,7 +131,7 @@ fn card_height(session: &Session, bookmarks: &HashMap<String, String>) -> u16 {
 ///
 /// Single forward pass: first count mains per key, then walk again marking
 /// the first main of each multi-agent group.
-fn compute_header_flags(visible: &[&Session]) -> Vec<bool> {
+pub(crate) fn compute_header_flags(visible: &[&Session]) -> Vec<bool> {
     use std::collections::HashMap;
     let mut sizes: HashMap<Option<&str>, usize> = HashMap::new();
     for s in visible.iter() {
@@ -162,7 +162,7 @@ fn slot_height(visible: &[&Session], idx: usize, header_flags: &[bool], bookmark
 
 /// Compute how many cards fit from `start` in `sessions` given `avail` lines,
 /// accounting for any group headers rendered inline.
-fn cards_fitting(sessions: &[&Session], start: usize, avail: u16, header_flags: &[bool], bookmarks: &HashMap<String, String>) -> usize {
+pub(crate) fn cards_fitting(sessions: &[&Session], start: usize, avail: u16, header_flags: &[bool], bookmarks: &HashMap<String, String>) -> usize {
     let mut used = 0u16;
     let mut count = 0;
     for i in start..sessions.len() {
