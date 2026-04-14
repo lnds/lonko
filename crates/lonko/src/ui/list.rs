@@ -460,11 +460,12 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
     // Truncate name/branch so neither overflows the card width.
     // Prefix occupies ~7 columns: border(2) + avatar(4) + space(1).
     let name_budget = area.width.saturating_sub(7) as usize;
-    let name_w = UnicodeWidthStr::width(session.project_name.as_str());
+    let display = session.display_name();
+    let name_w = UnicodeWidthStr::width(display);
     let branch_w = UnicodeWidthStr::width(branch_str.as_str());
 
     let (name_display, branch_display) = if name_w + branch_w <= name_budget {
-        (session.project_name.clone(), branch_str)
+        (display.to_string(), branch_str)
     } else {
         // Prioritize showing the branch; truncate name first, then branch.
         let min_name = 6usize;
@@ -472,7 +473,7 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
             .saturating_sub(branch_w)
             .max(min_name)
             .min(name_budget); // never exceed total budget
-        let truncated_name = truncate_cols(&session.project_name, name_max);
+        let truncated_name = truncate_cols(display, name_max);
         let used = UnicodeWidthStr::width(truncated_name.as_str());
         let branch_max = name_budget.saturating_sub(used);
         let truncated_branch = if branch_max == 0 {
@@ -662,7 +663,7 @@ fn render_subagent_card(frame: &mut Frame, area: Rect, session: &Session, ctx: S
     let fixed_cols = 4 + 1 + 2 + UnicodeWidthStr::width(status_label.as_str()) + 2;
     let line1_budget = area.width as usize;
     let name_max = line1_budget.saturating_sub(fixed_cols) / 2; // half for name, half for prompt
-    let name_display = truncate_cols(&session.project_name, name_max.max(4));
+    let name_display = truncate_cols(session.display_name(), name_max.max(4));
     let name_used = UnicodeWidthStr::width(name_display.as_str());
 
     let max_prompt = line1_budget.saturating_sub(fixed_cols + name_used);

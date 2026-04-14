@@ -68,7 +68,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
                 Style::default().fg(status_color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                session.project_name.clone(),
+                session.display_name().to_string(),
                 Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
             ),
             Span::styled(branch_str, Style::default().fg(DIM)),
