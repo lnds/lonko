@@ -1,3 +1,10 @@
+## v0.5.1 (2026-04-13)
+
+### Fix
+
+- **ui**: truncate agent name and branch to fit card width
+- **scripts**: increase sidebar width from 22% to 25%
+
 ## v0.5.0 (2026-04-12)
 
 ### Feat
