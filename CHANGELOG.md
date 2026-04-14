@@ -1,3 +1,9 @@
+## v0.6.1 (2026-04-13)
+
+### Fix
+
+- **ui**: track double-click by card identity instead of screen row
+
 ## v0.6.0 (2026-04-13)
 
 ### Feat
