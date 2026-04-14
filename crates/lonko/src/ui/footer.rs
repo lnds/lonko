@@ -25,15 +25,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let busy_color = if active > 0 { ORANGE } else { DIM };
     let busy = Span::styled(format!("●{}/{}", active, total), Style::default().fg(busy_color));
 
-    let line1 = if state.bookmark_mode {
-        Line::from(vec![
-            Span::styled(" Note: ", Style::default().fg(BLUE)),
-            Span::styled(
-                format!("{}▏", state.bookmark_input),
-                Style::default().fg(Color::White),
-            ),
-        ])
-    } else if is_waiting {
+    let line1 = if is_waiting {
         Line::from(vec![
             busy,
             sep("  "),

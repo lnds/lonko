@@ -320,7 +320,14 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         } else {
             None
         };
-        card_constraints.push(Constraint::Length(card_height(s, &state.bookmarks)));
+        let mut ch = card_height(s, &state.bookmarks);
+        // Bookmark editing on a card without a saved note needs an extra line.
+        if global_idx == state.selected && state.bookmark_mode
+            && !state.bookmarks.contains_key(&s.cwd) && !s.is_subagent()
+        {
+            ch += 1;
+        }
+        card_constraints.push(Constraint::Length(ch));
         let card_idx = card_constraints.len() - 1;
         slot_chunks.push((header_idx, card_idx));
         if i < page.len() - 1 {
@@ -359,8 +366,14 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             } else {
                 None
             };
+            let bookmark_input = if selected && state.bookmark_mode {
+                Some(state.bookmark_input.as_str())
+            } else {
+                None
+            };
             render_session_card(frame, chunks[chunk_idx], session, CardCtx {
-                selected, focused, tick: state.tick, position, icon, bookmark_note, worktree_input,
+                selected, focused, tick: state.tick, position, icon, bookmark_note,
+                worktree_input, bookmark_input,
             });
         }
     }
@@ -386,6 +399,8 @@ struct CardCtx<'a> {
     bookmark_note: Option<&'a str>,
     /// When Some, the card shows an inline branch input replacing the progress bar.
     worktree_input: Option<&'a str>,
+    /// When Some, the card shows an inline bookmark input (editing or creating).
+    bookmark_input: Option<&'a str>,
 }
 
 struct SubCardCtx {
@@ -396,7 +411,7 @@ struct SubCardCtx {
 }
 
 fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: CardCtx<'_>) {
-    let CardCtx { selected, focused, tick, position, icon, bookmark_note, worktree_input } = ctx;
+    let CardCtx { selected, focused, tick, position, icon, bookmark_note, worktree_input, bookmark_input } = ctx;
     let accent = session_color(position);
     let is_waiting = session.status.is_waiting();
     let is_waiting_input = session.status.is_waiting_input();
@@ -530,21 +545,50 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
         Line::from(vec![num_span])
     };
 
-    // Optional bookmark line (only rendered when a note is set)
-    let bookmark_line = bookmark_note.map(|note| {
-        let max_note = area.width.saturating_sub(8) as usize; // room for indent + "🔖 "
-        let truncated = if note.chars().count() > max_note {
-            let s: String = note.chars().take(max_note.saturating_sub(1)).collect();
-            format!("{s}…")
-        } else {
-            note.to_string()
+    // Optional bookmark line: inline input when editing, saved note otherwise.
+    let bookmark_line = if let Some(input) = bookmark_input {
+        let label = "🔖 ";
+        let hint = "Enter/Esc";
+        let avail = area.width.saturating_sub(8) as usize; // room for indent + label
+        let has_hint = avail >= 22;
+        let hint_cols = if has_hint { hint.len() + 2 } else { 0 };
+        let input_max = avail.saturating_sub(hint_cols);
+        let input_display = {
+            let count = input.chars().count();
+            if count <= input_max {
+                format!("{input}▏")
+            } else {
+                let skip = count - input_max + 2;
+                format!("…{}▏", input.chars().skip(skip).collect::<String>())
+            }
         };
-        Line::from(vec![
+        let mut spans = vec![
             Span::raw(indent),
-            Span::styled("🔖 ", Style::default().fg(BOOKMARK)),
-            Span::styled(truncated, Style::default().fg(TEXT)),
-        ])
-    });
+            Span::styled(label, Style::default().fg(BOOKMARK)),
+            Span::styled(input_display, Style::default().fg(TEXT)),
+        ];
+        if has_hint {
+            let pad = avail.saturating_sub(input.chars().count().min(input_max) + 1 + hint_cols);
+            spans.push(Span::raw(" ".repeat(pad + 2)));
+            spans.push(Span::styled(hint, Style::default().fg(DIM)));
+        }
+        Some(Line::from(spans))
+    } else {
+        bookmark_note.map(|note| {
+            let max_note = area.width.saturating_sub(8) as usize;
+            let truncated = if note.chars().count() > max_note {
+                let s: String = note.chars().take(max_note.saturating_sub(1)).collect();
+                format!("{s}…")
+            } else {
+                note.to_string()
+            };
+            Line::from(vec![
+                Span::raw(indent),
+                Span::styled("🔖 ", Style::default().fg(BOOKMARK)),
+                Span::styled(truncated, Style::default().fg(TEXT)),
+            ])
+        })
+    };
 
     // Line 3: spinner (when running) + status label + elapsed
     let is_running = matches!(&session.status, SessionStatus::Running | SessionStatus::RunningTool(_));
