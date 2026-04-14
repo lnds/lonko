@@ -5,6 +5,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 use crate::state::{AppState, Session, SessionStatus};
 
 const SPINNER: &[&str] = throbber_widgets_tui::BRAILLE_SIX_DOUBLE.symbols;
@@ -64,6 +65,27 @@ const SESSION_PALETTE: &[Color] = &[
     Color::Rgb(187, 154, 247),  // purple  #bb9af7
     Color::Rgb(42, 195, 222),   // cyan    #2ac3de
 ];
+
+/// Truncate `s` to at most `max_cols` display columns, appending `…` if truncated.
+fn truncate_cols(s: &str, max_cols: usize) -> String {
+    let w = UnicodeWidthStr::width(s);
+    if w <= max_cols {
+        return s.to_string();
+    }
+    if max_cols <= 1 {
+        return "…".to_string();
+    }
+    let target = max_cols - 1; // reserve 1 column for '…'
+    let mut cols = 0;
+    let mut end = 0;
+    for (i, ch) in s.char_indices() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+        if cols + cw > target { break; }
+        cols += cw;
+        end = i + ch.len_utf8();
+    }
+    format!("{}…", &s[..end])
+}
 
 fn session_color(position: usize) -> Color {
     // Use 1-indexed position so slot 1 → palette[0], slot 2 → palette[1], etc.
@@ -415,16 +437,42 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
         .unwrap_or_default();
 
     // Line 1: avatar + project name + branch (number appears below avatar on line 2)
+    // Truncate name/branch so neither overflows the card width.
+    // Prefix occupies ~7 columns: border(2) + avatar(4) + space(1).
+    let name_budget = area.width.saturating_sub(7) as usize;
+    let name_w = UnicodeWidthStr::width(session.project_name.as_str());
+    let branch_w = UnicodeWidthStr::width(branch_str.as_str());
+
+    let (name_display, branch_display) = if name_w + branch_w <= name_budget {
+        (session.project_name.clone(), branch_str)
+    } else {
+        // Prioritize showing the branch; truncate name first, then branch.
+        let min_name = 6usize;
+        let name_max = name_budget
+            .saturating_sub(branch_w)
+            .max(min_name)
+            .min(name_budget); // never exceed total budget
+        let truncated_name = truncate_cols(&session.project_name, name_max);
+        let used = UnicodeWidthStr::width(truncated_name.as_str());
+        let branch_max = name_budget.saturating_sub(used);
+        let truncated_branch = if branch_max == 0 {
+            String::new()
+        } else {
+            truncate_cols(&branch_str, branch_max)
+        };
+        (truncated_name, truncated_branch)
+    };
+
     let name_line = Line::from(vec![
         avatar_span,
         Span::raw(" "),
         Span::styled(
-            session.project_name.clone(),
+            name_display,
             Style::default().fg(accent).add_modifier(
                 if focused { Modifier::BOLD | Modifier::UNDERLINED } else { Modifier::BOLD }
             ),
         ),
-        Span::styled(branch_str, Style::default().fg(DIM)),
+        Span::styled(branch_display, Style::default().fg(DIM)),
     ]);
 
     // Lines 3-5 indent (4 spaces) aligns with project name: 3 (avatar) + 1 (space)
@@ -582,22 +630,24 @@ fn render_subagent_card(frame: &mut Frame, area: Rect, session: &Session, ctx: S
         Span::styled(format!("{} ", status_glyph), Style::default().fg(status_color))
     };
 
-    let max_prompt = area.width.saturating_sub(10) as usize;
+    let status_label = session.status.label();
+    // Budget for line 1: "  ╰ "(4) + name + " "(1) + glyph(2) + status + "  "(2) + prompt
+    let fixed_cols = 4 + 1 + 2 + UnicodeWidthStr::width(status_label.as_str()) + 2;
+    let line1_budget = area.width as usize;
+    let name_max = line1_budget.saturating_sub(fixed_cols) / 2; // half for name, half for prompt
+    let name_display = truncate_cols(&session.project_name, name_max.max(4));
+    let name_used = UnicodeWidthStr::width(name_display.as_str());
+
+    let max_prompt = line1_budget.saturating_sub(fixed_cols + name_used);
     let prompt_text = session.last_prompt.as_deref()
         .or(session.last_tool.as_deref())
         .unwrap_or("");
-    let prompt_display = if prompt_text.chars().count() > max_prompt {
-        let s: String = prompt_text.chars().take(max_prompt.saturating_sub(1)).collect();
-        format!("{}…", s)
-    } else {
-        prompt_text.to_string()
-    };
+    let prompt_display = truncate_cols(prompt_text, max_prompt);
 
-    let status_label = session.status.label();
     let line1 = Line::from(vec![
         Span::styled("  ╰ ", Style::default().fg(accent)),
         Span::styled(
-            session.project_name.clone(),
+            name_display,
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
@@ -706,5 +756,46 @@ mod tests {
 
         let flags = compute_header_flags(&visible);
         assert_eq!(flags, vec![false, false]);
+    }
+
+    #[test]
+    fn truncate_cols_ascii_fits() {
+        assert_eq!(truncate_cols("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_cols_ascii_exact() {
+        assert_eq!(truncate_cols("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_cols_ascii_truncated() {
+        assert_eq!(truncate_cols("hello world", 7), "hello …");
+    }
+
+    #[test]
+    fn truncate_cols_min_budget() {
+        assert_eq!(truncate_cols("hello", 1), "…");
+    }
+
+    #[test]
+    fn truncate_cols_wide_chars() {
+        // CJK characters are 2 columns wide each
+        // "修复" = 4 columns, budget = 3 → "修…" (2+1=3)
+        assert_eq!(truncate_cols("修复溢出", 3), "修…");
+    }
+
+    #[test]
+    fn truncate_cols_wide_chars_exact_fit() {
+        // "修复" = 4 columns, budget = 4 → no truncation
+        assert_eq!(truncate_cols("修复", 4), "修复");
+    }
+
+    #[test]
+    fn truncate_cols_mixed_ascii_wide() {
+        // "ab修复cd" = 2+4+2 = 8 cols, budget = 6, target = 5
+        // "ab修" = 4 cols ≤ 5 ✓, next "复" = 2 cols → 6 > 5, stop
+        // result: "ab修…" = 5 cols
+        assert_eq!(truncate_cols("ab修复cd", 6), "ab修…");
     }
 }
