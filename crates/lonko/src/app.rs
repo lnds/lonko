@@ -251,18 +251,21 @@ impl App {
 
         let list_h = h.saturating_sub(3 + 1);
         let header_flags = ui::list::compute_header_flags(&visible);
-        let cards_visible = ui::list::cards_fitting(
-            &visible, 0, list_h, &header_flags, &self.state.bookmarks,
-        ).min(total);
-        let scroll = compute_scroll_offset(self.state.selected, total, cards_visible);
+        let (scroll, cards_visible) = ui::list::compute_scroll(
+            &visible, self.state.selected, list_h, &header_flags, &self.state.bookmarks,
+        );
 
-        // Linear scan to find which card was clicked based on row offset from y=3
+        // Linear scan to find which card was clicked based on row offset from y=3.
+        // Must mirror the render layout: header + card + separator (between cards only).
         let click_y = row - 3;
         let mut y_acc: u16 = 0;
         let mut card_idx: Option<usize> = None;
-        for (i, s) in visible[scroll..].iter().enumerate() {
+        let page_end = (scroll + cards_visible).min(visible.len());
+        for (i, s) in visible[scroll..page_end].iter().enumerate() {
             let global = scroll + i;
-            // Group headers consume a line above certain cards
+            if i > 0 {
+                y_acc += 1; // separator between cards (not before first)
+            }
             if header_flags[global] {
                 y_acc += ui::list::GROUP_HEADER_HEIGHT;
             }
@@ -271,7 +274,7 @@ impl App {
                 card_idx = Some(i);
                 break;
             }
-            y_acc += ch + 1; // card height + separator
+            y_acc += ch;
         }
 
         let global_idx = match card_idx {

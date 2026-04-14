@@ -174,6 +174,30 @@ pub(crate) fn cards_fitting(sessions: &[&Session], start: usize, avail: u16, hea
     count.max(1)
 }
 
+/// Compute scroll offset and visible count for a card list.
+/// Two-phase: first estimate cards from start, derive scroll, then recompute
+/// from the actual scroll position.  Both render and hit-test must use this.
+pub(crate) fn compute_scroll(
+    visible: &[&Session],
+    selected: usize,
+    avail: u16,
+    header_flags: &[bool],
+    bookmarks: &HashMap<String, String>,
+) -> (usize, usize) {
+    let total = visible.len();
+    let approx = cards_fitting(visible, 0, avail, header_flags, bookmarks).min(total);
+    let half = approx / 2;
+    let scroll = if selected < half {
+        0
+    } else if selected + (approx - half) >= total {
+        total.saturating_sub(approx)
+    } else {
+        selected - half
+    };
+    let cards_visible = cards_fitting(visible, scroll, avail, header_flags, bookmarks).min(total - scroll);
+    (scroll, cards_visible)
+}
+
 /// Compute the 1-indexed main-agent position for a session.
 /// Subagents inherit their parent's position (returning 0 = no position number).
 fn main_position(visible: &[&Session], idx: usize) -> usize {
@@ -239,23 +263,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let total = visible.len();
     let header_flags = compute_header_flags(&visible);
 
-    // Variable-height cards: compute how many fit from the scroll offset
-    let cards_visible = cards_fitting(&visible, 0, list_area.height, &header_flags, &state.bookmarks);
-    let cards_visible = cards_visible.min(total);
-
-    // Scroll offset: keep selected roughly centered, clamped to valid range.
-    let half = cards_visible / 2;
-    let scroll = if state.selected < half {
-        0
-    } else if state.selected + (cards_visible - half) >= total {
-        total.saturating_sub(cards_visible)
-    } else {
-        state.selected - half
-    };
-
-    // Recompute visible cards from the actual scroll position
-    let cards_visible =
-        cards_fitting(&visible, scroll, list_area.height, &header_flags, &state.bookmarks).min(total - scroll);
+    let (scroll, cards_visible) = compute_scroll(
+        &visible, state.selected, list_area.height, &header_flags, &state.bookmarks,
+    );
     let page = &visible[scroll..scroll + cards_visible];
 
     // Pre-assign icons for main agents only (subagents don't get icons)
