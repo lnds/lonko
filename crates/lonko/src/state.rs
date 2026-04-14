@@ -281,6 +281,24 @@ pub struct AppState {
     pub bookmark_input: String,
     /// Whether the help popup is visible.
     pub show_help: bool,
+    /// New-agent creation mode: user is typing an initial prompt.
+    pub new_agent_mode: bool,
+    /// Prompt text being typed for the new agent.
+    pub new_agent_input: String,
+    /// Editable cwd buffer for the new agent popup.
+    pub new_agent_cwd_input: String,
+    /// The auto-resolved cwd stored when entering new-agent mode.
+    /// Used to expand `.` at submit time.
+    pub new_agent_resolved_cwd: String,
+    /// Which field has focus in the new-agent popup.
+    pub new_agent_focus: NewAgentField,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub enum NewAgentField {
+    #[default]
+    Cwd,
+    Prompt,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -381,6 +399,11 @@ impl Default for AppState {
             bookmark_mode: false,
             bookmark_input: String::new(),
             show_help: false,
+            new_agent_mode: false,
+            new_agent_input: String::new(),
+            new_agent_cwd_input: String::new(),
+            new_agent_resolved_cwd: String::new(),
+            new_agent_focus: NewAgentField::default(),
         }
     }
 }
@@ -673,6 +696,91 @@ impl AppState {
             _ => {}
         }
         None
+    }
+
+    /// Apply a key to new-agent mode. Returns `Some((prompt, cwd))` on Enter
+    /// in the Prompt field when both are non-empty. Enter in the Cwd field
+    /// jumps focus to Prompt. Tab toggles between fields.
+    pub fn apply_new_agent_key(&mut self, code: crossterm::event::KeyCode, ctrl: bool) -> Option<(String, String)> {
+        use crossterm::event::KeyCode;
+        match code {
+            KeyCode::Esc => {
+                self.clear_new_agent();
+            }
+            KeyCode::Char('c') if ctrl => {
+                self.clear_new_agent();
+            }
+            KeyCode::Tab => match self.new_agent_focus {
+                NewAgentField::Cwd => {
+                    self.new_agent_cwd_input =
+                        crate::new_agent::complete_path(&self.new_agent_cwd_input);
+                }
+                NewAgentField::Prompt => {
+                    self.new_agent_focus = NewAgentField::Cwd;
+                }
+            }
+            KeyCode::Enter => match self.new_agent_focus {
+                NewAgentField::Cwd => {
+                    self.new_agent_focus = NewAgentField::Prompt;
+                }
+                NewAgentField::Prompt => {
+                    let prompt = self.new_agent_input.trim().to_string();
+                    let raw_cwd = self.new_agent_cwd_input.trim().to_string();
+                    // Resolve `.` to the auto-detected cwd.
+                    let cwd = if raw_cwd == "." {
+                        self.new_agent_resolved_cwd.clone()
+                    } else {
+                        raw_cwd.clone()
+                    };
+                    if cwd.is_empty() {
+                        self.new_agent_focus = NewAgentField::Cwd;
+                    } else if prompt.is_empty() {
+                        // Nothing to submit — stay in prompt field.
+                    } else {
+                        self.clear_new_agent();
+                        return Some((prompt, cwd));
+                    }
+                }
+            }
+            KeyCode::Backspace => match self.new_agent_focus {
+                NewAgentField::Cwd => { self.new_agent_cwd_input.pop(); }
+                NewAgentField::Prompt => { self.new_agent_input.pop(); }
+            }
+            KeyCode::Char(c) if c != '\n' && c != '\r' => match self.new_agent_focus {
+                NewAgentField::Cwd => { self.new_agent_cwd_input.push(c); }
+                NewAgentField::Prompt => { self.new_agent_input.push(c); }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Open the new-agent popup. If `cwd` is non-empty, the Dir field
+    /// shows `.` (shorthand for "same directory") and the resolved path
+    /// is stored for expansion at submit time. An empty `cwd` leaves
+    /// the Dir field empty so the user must type a path.
+    pub fn open_new_agent(&mut self, cwd: String) {
+        self.new_agent_resolved_cwd = cwd.clone();
+        self.new_agent_cwd_input = if cwd.is_empty() {
+            String::new()
+        } else {
+            ".".to_string()
+        };
+        self.new_agent_input.clear();
+        self.new_agent_focus = if cwd.is_empty() {
+            NewAgentField::Cwd
+        } else {
+            NewAgentField::Prompt
+        };
+        self.new_agent_mode = true;
+    }
+
+    fn clear_new_agent(&mut self) {
+        self.new_agent_mode = false;
+        self.new_agent_input.clear();
+        self.new_agent_cwd_input.clear();
+        self.new_agent_resolved_cwd.clear();
+        self.new_agent_focus = NewAgentField::default();
     }
 
     /// Return tmux sessions filtered by the current search query.
@@ -1169,6 +1277,156 @@ mod tests {
         assert_eq!(context_max_for_model("sonnet-4-6"), 200_000);
         assert_eq!(context_max_for_model("unknown"), 200_000);
         assert_eq!(context_max_for_model("claude-opus-4-6"), 1_000_000);
+    }
+
+    // ── apply_new_agent_key ─────────────────────────────────────────────────
+
+    #[test]
+    fn new_agent_open_with_cwd_starts_on_prompt() {
+        let mut state = AppState::default();
+        state.open_new_agent("/tmp".into());
+        assert_eq!(state.new_agent_focus, NewAgentField::Prompt);
+        assert_eq!(state.new_agent_cwd_input, ".");
+        assert_eq!(state.new_agent_resolved_cwd, "/tmp");
+    }
+
+    #[test]
+    fn new_agent_open_without_cwd_starts_on_cwd() {
+        let mut state = AppState::default();
+        state.open_new_agent(String::new());
+        assert_eq!(state.new_agent_focus, NewAgentField::Cwd);
+        assert!(state.new_agent_cwd_input.is_empty());
+    }
+
+    #[test]
+    fn new_agent_tab_in_prompt_switches_to_cwd() {
+        use crossterm::event::KeyCode;
+        let mut state = AppState::default();
+        state.open_new_agent("/tmp".into());
+        // focus starts on Prompt (non-empty cwd)
+        state.apply_new_agent_key(KeyCode::Tab, false);
+        assert_eq!(state.new_agent_focus, NewAgentField::Cwd);
+    }
+
+    #[test]
+    fn new_agent_tab_in_cwd_completes_path() {
+        use crossterm::event::KeyCode;
+        // Use a real temp dir with a known child so the test is deterministic.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("unique-child")).unwrap();
+        let partial = format!("{}/uni", tmp.path().display());
+
+        let mut state = AppState::default();
+        // Directly set the cwd_input to a partial path for completion testing.
+        state.new_agent_mode = true;
+        state.new_agent_focus = NewAgentField::Cwd;
+        state.new_agent_cwd_input = partial;
+        state.apply_new_agent_key(KeyCode::Tab, false);
+        assert!(state.new_agent_cwd_input.contains("unique-child"),
+            "expected completion, got: {}", state.new_agent_cwd_input);
+        assert_eq!(state.new_agent_focus, NewAgentField::Cwd);
+    }
+
+    #[test]
+    fn new_agent_enter_on_cwd_moves_to_prompt() {
+        use crossterm::event::KeyCode;
+        let mut state = AppState::default();
+        state.open_new_agent("/tmp".into());
+        // open_new_agent with a non-empty cwd starts focus on Prompt;
+        // switch to Cwd to test the Enter-on-Cwd path.
+        state.new_agent_focus = NewAgentField::Cwd;
+        let result = state.apply_new_agent_key(KeyCode::Enter, false);
+        assert!(result.is_none());
+        assert!(state.new_agent_mode); // still open
+        assert_eq!(state.new_agent_focus, NewAgentField::Prompt);
+    }
+
+    #[test]
+    fn new_agent_enter_on_prompt_submits_when_both_filled() {
+        use crossterm::event::KeyCode;
+        let mut state = AppState::default();
+        state.open_new_agent("/tmp/proj".into());
+        // open_new_agent sets cwd_input="." and focus=Prompt
+        state.new_agent_input = "build a thing".into();
+        let result = state.apply_new_agent_key(KeyCode::Enter, false);
+        // "." resolves to the stored resolved_cwd
+        assert_eq!(result, Some(("build a thing".into(), "/tmp/proj".into())));
+        assert!(!state.new_agent_mode);
+    }
+
+    #[test]
+    fn new_agent_enter_on_prompt_with_empty_cwd_nudges_to_cwd() {
+        use crossterm::event::KeyCode;
+        let mut state = AppState::default();
+        state.open_new_agent(String::new());
+        state.new_agent_focus = NewAgentField::Prompt;
+        state.new_agent_input = "build a thing".into();
+        let result = state.apply_new_agent_key(KeyCode::Enter, false);
+        assert!(result.is_none());
+        assert!(state.new_agent_mode); // still open
+        assert_eq!(state.new_agent_focus, NewAgentField::Cwd); // nudged
+    }
+
+    #[test]
+    fn new_agent_enter_on_prompt_with_empty_prompt_stays() {
+        use crossterm::event::KeyCode;
+        let mut state = AppState::default();
+        state.open_new_agent("/tmp".into());
+        state.new_agent_focus = NewAgentField::Prompt;
+        // prompt is empty
+        let result = state.apply_new_agent_key(KeyCode::Enter, false);
+        assert!(result.is_none());
+        assert!(state.new_agent_mode); // still open
+        assert_eq!(state.new_agent_focus, NewAgentField::Prompt); // stays
+    }
+
+    #[test]
+    fn new_agent_esc_clears_everything() {
+        use crossterm::event::KeyCode;
+        let mut state = AppState::default();
+        state.open_new_agent("/tmp".into());
+        state.new_agent_input = "hello".into();
+        state.apply_new_agent_key(KeyCode::Esc, false);
+        assert!(!state.new_agent_mode);
+        assert!(state.new_agent_input.is_empty());
+        assert!(state.new_agent_cwd_input.is_empty());
+    }
+
+    #[test]
+    fn new_agent_ctrl_c_clears_everything() {
+        use crossterm::event::KeyCode;
+        let mut state = AppState::default();
+        state.open_new_agent("/tmp".into());
+        state.new_agent_input = "hello".into();
+        state.apply_new_agent_key(KeyCode::Char('c'), true);
+        assert!(!state.new_agent_mode);
+        assert!(state.new_agent_input.is_empty());
+    }
+
+    #[test]
+    fn new_agent_char_routes_to_focused_field() {
+        use crossterm::event::KeyCode;
+        let mut state = AppState::default();
+        state.open_new_agent(String::new());
+        // Focus starts on Cwd
+        state.apply_new_agent_key(KeyCode::Char('a'), false);
+        assert_eq!(state.new_agent_cwd_input, "a");
+        assert!(state.new_agent_input.is_empty());
+
+        state.new_agent_focus = NewAgentField::Prompt;
+        state.apply_new_agent_key(KeyCode::Char('b'), false);
+        assert_eq!(state.new_agent_input, "b");
+        assert_eq!(state.new_agent_cwd_input, "a"); // unchanged
+    }
+
+    #[test]
+    fn new_agent_rejects_newlines() {
+        use crossterm::event::KeyCode;
+        let mut state = AppState::default();
+        state.open_new_agent(String::new());
+        state.apply_new_agent_key(KeyCode::Char('\n'), false);
+        state.apply_new_agent_key(KeyCode::Char('\r'), false);
+        assert!(state.new_agent_cwd_input.is_empty());
     }
 
     // ── navigate_tmux_session ──────────────────────────────────────────────

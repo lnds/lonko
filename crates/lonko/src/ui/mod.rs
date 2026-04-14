@@ -3,6 +3,7 @@ mod footer;
 mod header;
 mod help;
 pub(crate) mod list;
+mod new_agent;
 pub(crate) mod tmux_sessions;
 
 use ratatui::Frame;
@@ -39,5 +40,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     if state.show_help {
         help::render(frame);
+    }
+
+    if state.new_agent_mode {
+        new_agent::render(frame, state);
     }
 }
