@@ -1,3 +1,9 @@
+## v0.8.0 (2026-04-13)
+
+### Feat
+
+- **worktree**: copy dotfiles and run direnv allow on new worktrees
+
 ## v0.7.1 (2026-04-13)
 
 ### Fix
