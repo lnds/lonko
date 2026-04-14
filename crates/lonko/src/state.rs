@@ -188,14 +188,17 @@ impl Session {
 
     /// Display name for this session. For grouped worktree agents (those
     /// with a `repo_root`), derives a short name from the branch:
-    ///   - takes the last `/`-separated segment of the branch name
-    ///   - strips the repo group prefix (+ hyphen) if present
+    ///   - if the branch is trunk (`main`/`master`), uses the repo/group
+    ///     name instead — "main" alone is not informative when multiple
+    ///     repos are visible in the list
+    ///   - otherwise takes the last `/`-separated segment of the branch
+    ///     name and strips the repo group prefix (+ hyphen) if present
     /// Falls back to `project_name` when there is no branch or repo_root.
     ///
     /// Examples (group = "lonko"):
     ///   "feat/toki-24/new-agent" → "new-agent"
     ///   "lonko-3-new-agent"      → "3-new-agent"
-    ///   "main"                   → "main"
+    ///   "main"                   → "lonko"
     pub fn display_name(&self) -> &str {
         if let (Some(branch), Some(repo_root)) = (&self.branch, &self.repo_root) {
             let tail = branch.rsplit('/').next().unwrap_or(branch);
@@ -203,6 +206,12 @@ impl Session {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
+            // Trunk branches ("main"/"master") are not informative on their
+            // own — show the repo/group name instead so multiple repos on
+            // trunk remain distinguishable in the agents list.
+            if !group.is_empty() && is_trunk_branch(Some(tail)) {
+                return group;
+            }
             // Strip "<group>-" prefix from the tail if present.
             let prefix_len = group.len() + 1; // +1 for '-'
             let tail_start = branch.len() - tail.len();
@@ -1846,9 +1855,15 @@ mod tests {
     }
 
     #[test]
-    fn display_name_keeps_trunk_branch_as_is() {
+    fn display_name_shows_repo_name_for_trunk_branch() {
         let s = main_with_repo_branch("id", "/r/lonko", "main");
-        assert_eq!(s.display_name(), "main");
+        assert_eq!(s.display_name(), "lonko");
+    }
+
+    #[test]
+    fn display_name_shows_repo_name_for_master_branch() {
+        let s = main_with_repo_branch("id", "/r/my-app", "master");
+        assert_eq!(s.display_name(), "my-app");
     }
 
     #[test]
