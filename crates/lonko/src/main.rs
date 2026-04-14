@@ -7,6 +7,7 @@ mod respond;
 mod sources;
 mod state;
 mod ui;
+mod new_agent;
 mod worktree;
 
 use color_eyre::Result;

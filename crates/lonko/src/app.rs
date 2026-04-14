@@ -892,6 +892,12 @@ impl App {
             }
             return Ok(false);
         }
+        if self.state.new_agent_mode {
+            if let Some((prompt, cwd)) = self.state.apply_new_agent_key(key.code, ctrl) {
+                self.spawn_new_agent(&cwd, &prompt);
+            }
+            return Ok(false);
+        }
         if self.state.worktree_mode {
             if let Some(branch) = self.state.apply_worktree_key(key.code, ctrl) {
                 let cwd = self.state.worktree_cwd.take().unwrap_or_default();
@@ -1036,7 +1042,10 @@ impl App {
             // Permission shortcuts (y=yes/1, w=always/2, n=no/3)
             KeyCode::Char('y') => self.send_permission("1"),
             KeyCode::Char('w') => self.send_permission("2"),
-            KeyCode::Char('n') => self.send_permission("3"),
+            KeyCode::Char('n') if self.state.has_waiting() => self.send_permission("3"),
+            KeyCode::Char('n') if self.state.active_tab == Tab::Agents => {
+                self.launch_new_agent_prompt();
+            }
             KeyCode::Char('x') if !self.state.has_waiting() => {
                 match self.state.active_tab {
                     Tab::Agents  => self.kill_and_remove_worktree(),
@@ -1219,6 +1228,42 @@ impl App {
         std::thread::spawn(move || {
             if let Err(e) = crate::worktree::run(&cwd, &branch) {
                 tmux::display_message(&format!("worktree: {e}"));
+            }
+        });
+    }
+
+    /// Enter new-agent mode: resolve a cwd and show the prompt popup.
+    fn launch_new_agent_prompt(&mut self) {
+        let cwd = if self.state.active_tab == crate::state::Tab::Agents {
+            self.state.selected_session().map(|s| s.cwd.clone())
+        } else {
+            self.state.selected_tmux_session()
+                .and_then(|s| tmux::session_cwd(&s.name))
+        };
+
+        // Fallback: active tmux pane's cwd
+        let cwd = cwd.or_else(|| {
+            tmux::active_pane().and_then(|p| {
+                std::process::Command::new("tmux")
+                    .args(["display-message", "-t", &p, "-p", "#{pane_current_path}"])
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+        });
+
+        self.state.open_new_agent(cwd.unwrap_or_default());
+    }
+
+    /// Spawn a new Claude Code agent in a background thread.
+    fn spawn_new_agent(&self, cwd: &str, prompt: &str) {
+        let cwd = cwd.to_string();
+        let prompt = prompt.to_string();
+        std::thread::spawn(move || {
+            if let Err(e) = crate::new_agent::run(&cwd, &prompt) {
+                tmux::display_message(&format!("new-agent: {e}"));
             }
         });
     }
