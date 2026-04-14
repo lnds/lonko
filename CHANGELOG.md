@@ -1,3 +1,9 @@
+## v0.10.0 (2026-04-13)
+
+### Feat
+
+- **ui**: inline worktree and bookmark inputs on selected agent card
+
 ## v0.9.0 (2026-04-13)
 
 ### Feat
