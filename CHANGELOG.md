@@ -1,3 +1,9 @@
+## v0.7.1 (2026-04-13)
+
+### Fix
+
+- **tmux**: clear screen before launching claude in new sessions
+
 ## v0.7.0 (2026-04-13)
 
 ### Feat
