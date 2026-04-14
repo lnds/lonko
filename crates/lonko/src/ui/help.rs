@@ -14,7 +14,7 @@ const TEXT_COLOR: Color = Color::Rgb(169, 177, 214);
 fn key_line(key: &str, desc: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(
-            format!("  {:<14}", key),
+            format!(" {:<8}", key),
             Style::default().fg(KEY_COLOR),
         ),
         Span::styled(desc.to_string(), Style::default().fg(TEXT_COLOR)),
@@ -23,7 +23,7 @@ fn key_line(key: &str, desc: &str) -> Line<'static> {
 
 fn section_header(title: &str) -> Line<'static> {
     Line::from(Span::styled(
-        format!("  {title}"),
+        format!(" {title}"),
         Style::default().fg(BLUE).add_modifier(Modifier::BOLD),
     ))
 }
@@ -34,40 +34,40 @@ pub fn render(frame: &mut Frame) {
         section_header("Navigation"),
         key_line("j / ↓", "Move down"),
         key_line("k / ↑", "Move up"),
-        key_line("h / ←", "Move left (Sessions tab)"),
-        key_line("l / →", "Move right (Sessions tab)"),
+        key_line("h / ←", "Move left (Sessions)"),
+        key_line("l / →", "Move right (Sessions)"),
         key_line("Tab", "Switch tab"),
         key_line("a", "Agents tab"),
         key_line("s", "Sessions tab"),
-        key_line("Enter", "Focus selected session"),
-        key_line("Space", "Expand / collapse (Sessions)"),
-        key_line("1-9", "Jump to nth session"),
+        key_line("Enter", "Focus session"),
+        key_line("Space", "Expand (Sessions)"),
+        key_line("1-9", "Jump to nth"),
         Line::raw(""),
         section_header("Actions"),
-        key_line("d", "Toggle detail view"),
+        key_line("d", "Detail view"),
         key_line("/", "Search"),
-        key_line("b", "Bookmark (Agents tab)"),
-        key_line("g", "Create worktree"),
-        key_line("p", "PR worktree (Agents tab)"),
-        key_line("n", "New agent (Agents tab)"),
-        key_line("x", "Kill + remove worktree"),
+        key_line("b", "Bookmark (Agents)"),
+        key_line("g", "Worktree (Agents)"),
+        key_line("p", "PR worktree (Agents)"),
+        key_line("n", "New agent (Agents)"),
+        key_line("x", "Kill + remove wt"),
         key_line("X", "Kill agent"),
         Line::raw(""),
         section_header("Permissions (when waiting)"),
         key_line("y", "Yes"),
         key_line("w", "Always"),
-        key_line("n", "No (overrides new agent)"),
+        key_line("n", "No"),
         Line::raw(""),
         section_header("General"),
         key_line("q", "Hide panel"),
-        key_line("Esc", "Back / clear search"),
+        key_line("Esc", "Back / clear"),
         key_line("? / h", "This help"),
         key_line("Ctrl-c", "Quit"),
         Line::raw(""),
     ];
 
     let height = lines.len() as u16 + 2; // +2 for borders
-    let width = 42;
+    let width = frame.area().width.saturating_sub(2).min(36);
 
     let area = centered(frame.area(), width, height);
 
