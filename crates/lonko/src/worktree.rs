@@ -77,6 +77,17 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Well-known dotfiles that are typically gitignored but should be
+/// propagated to new worktrees so the dev environment works out of the box.
+const DOTFILES: &[&str] = &[
+    ".envrc",
+    ".tool-versions",
+    ".nvmrc",
+    ".node-version",
+    ".ruby-version",
+    ".python-version",
+];
+
 /// Copy the `.claude/` config directory from the source repo into a new
 /// worktree, so Claude Code agents inherit local project settings
 /// (settings.local.json, allowed permissions, etc.). Silently skips if
@@ -88,6 +99,47 @@ fn copy_claude_config(source_root: &str, worktree_path: &Path) {
         if let Err(e) = copy_dir_recursive(&src, &dst) {
             eprintln!("warning: failed to copy .claude config to worktree: {e}");
         }
+    }
+}
+
+/// Copy well-known dotfiles from the source repo into a new worktree.
+/// Each file is copied individually (not as a directory). Skips files that
+/// don't exist at the source or already exist at the destination.
+/// Returns `true` if `.envrc` was copied (so the caller can run `direnv allow`).
+fn copy_dotfiles(source_root: &str, worktree_path: &Path) -> bool {
+    let src_root = Path::new(source_root);
+    let mut envrc_copied = false;
+    for name in DOTFILES {
+        let src = src_root.join(name);
+        let dst = worktree_path.join(name);
+        if src.is_file() && !dst.exists() {
+            if let Err(e) = std::fs::copy(&src, &dst) {
+                eprintln!("warning: failed to copy {name} to worktree: {e}");
+            } else if *name == ".envrc" {
+                envrc_copied = true;
+            }
+        }
+    }
+    envrc_copied
+}
+
+/// Run `direnv allow` on the worktree's `.envrc` so it is trusted.
+/// Silently ignores failures (direnv may not be installed).
+fn direnv_allow(worktree_path: &Path) {
+    let _ = Command::new("direnv")
+        .arg("allow")
+        .arg(worktree_path.join(".envrc"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// Set up the worktree environment: copy `.claude/` config and well-known
+/// dotfiles from the source repo, and trust `.envrc` if it was copied.
+fn setup_worktree_env(source_root: &str, worktree_path: &Path) {
+    copy_claude_config(source_root, worktree_path);
+    if copy_dotfiles(source_root, worktree_path) {
+        direnv_allow(worktree_path);
     }
 }
 
@@ -123,8 +175,8 @@ pub fn run(cwd: &str, branch: &str) -> anyhow::Result<()> {
         }
     }
 
-    // Copy .claude config so the new worktree inherits project settings
-    copy_claude_config(&root, &worktree_path);
+    // Propagate local environment config to the new worktree
+    setup_worktree_env(&root, &worktree_path);
 
     // Create tmux session in the worktree directory
     tmux::create_session(&session_name, &wt_str)?;
@@ -224,8 +276,8 @@ pub fn run_from_pr(cwd: &str, pr: &PrInfo) -> anyhow::Result<()> {
         }
     }
 
-    // Copy .claude config so the new worktree inherits project settings
-    copy_claude_config(&root, &worktree_path);
+    // Propagate local environment config to the new worktree
+    setup_worktree_env(&root, &worktree_path);
 
     // Create tmux session in the worktree directory
     tmux::create_session(&session_name, &wt_str)?;
@@ -519,6 +571,66 @@ mod tests {
             std::fs::read_to_string(worktree.join(".claude/settings.local.json")).unwrap(),
             "config"
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn copy_dotfiles_copies_envrc_and_returns_true() {
+        let tmp = std::env::temp_dir().join("lonko-test-copy-dotfiles");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let source = tmp.join("repo");
+        let worktree = tmp.join("wt");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(source.join(".envrc"), "use flake").unwrap();
+        std::fs::write(source.join(".tool-versions"), "erlang 26").unwrap();
+
+        let result = copy_dotfiles(source.to_str().unwrap(), &worktree);
+
+        assert!(result, "should return true when .envrc is copied");
+        assert_eq!(std::fs::read_to_string(worktree.join(".envrc")).unwrap(), "use flake");
+        assert_eq!(std::fs::read_to_string(worktree.join(".tool-versions")).unwrap(), "erlang 26");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn copy_dotfiles_returns_false_without_envrc() {
+        let tmp = std::env::temp_dir().join("lonko-test-copy-dotfiles-no-envrc");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let source = tmp.join("repo");
+        let worktree = tmp.join("wt");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(source.join(".nvmrc"), "20").unwrap();
+
+        let result = copy_dotfiles(source.to_str().unwrap(), &worktree);
+
+        assert!(!result, "should return false when no .envrc");
+        assert_eq!(std::fs::read_to_string(worktree.join(".nvmrc")).unwrap(), "20");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn copy_dotfiles_skips_existing() {
+        let tmp = std::env::temp_dir().join("lonko-test-copy-dotfiles-exist");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let source = tmp.join("repo");
+        let worktree = tmp.join("wt");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(source.join(".envrc"), "new").unwrap();
+        std::fs::write(worktree.join(".envrc"), "existing").unwrap();
+
+        let result = copy_dotfiles(source.to_str().unwrap(), &worktree);
+
+        assert!(!result, "should not report copied when dst already exists");
+        assert_eq!(std::fs::read_to_string(worktree.join(".envrc")).unwrap(), "existing");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
