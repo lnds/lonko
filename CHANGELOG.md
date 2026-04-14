@@ -1,3 +1,9 @@
+## v0.10.2 (2026-04-14)
+
+### Fix
+
+- **ui**: show repo name for trunk-branch agents in agents list
+
 ## v0.10.1 (2026-04-13)
 
 ### Fix
