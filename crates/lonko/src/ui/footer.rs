@@ -33,14 +33,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
                 Style::default().fg(Color::White),
             ),
         ])
-    } else if state.worktree_mode {
-        Line::from(vec![
-            Span::styled(" Branch: ", Style::default().fg(BLUE)),
-            Span::styled(
-                format!("{}▏", state.worktree_input),
-                Style::default().fg(Color::White),
-            ),
-        ])
     } else if is_waiting {
         Line::from(vec![
             busy,

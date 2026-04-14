@@ -354,8 +354,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             let main_idx = main_sessions.iter().position(|s| s.id == session.id).unwrap_or(0);
             let icon = all_main_icons.get(main_idx).copied().unwrap_or("🤖");
             let bookmark_note = state.bookmarks.get(&session.cwd).map(|s| s.as_str());
+            let worktree_input = if selected && state.worktree_mode {
+                Some(state.worktree_input.as_str())
+            } else {
+                None
+            };
             render_session_card(frame, chunks[chunk_idx], session, CardCtx {
-                selected, focused, tick: state.tick, position, icon, bookmark_note,
+                selected, focused, tick: state.tick, position, icon, bookmark_note, worktree_input,
             });
         }
     }
@@ -379,6 +384,8 @@ struct CardCtx<'a> {
     position: usize,
     icon: &'a str,
     bookmark_note: Option<&'a str>,
+    /// When Some, the card shows an inline branch input replacing the progress bar.
+    worktree_input: Option<&'a str>,
 }
 
 struct SubCardCtx {
@@ -389,7 +396,7 @@ struct SubCardCtx {
 }
 
 fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: CardCtx<'_>) {
-    let CardCtx { selected, focused, tick, position, icon, bookmark_note } = ctx;
+    let CardCtx { selected, focused, tick, position, icon, bookmark_note, worktree_input } = ctx;
     let accent = session_color(position);
     let is_waiting = session.status.is_waiting();
     let is_waiting_input = session.status.is_waiting_input();
@@ -588,17 +595,47 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
         DIM
     };
 
-    let progress_line = Line::from(vec![
-        Span::raw(indent),
-        Span::styled("▬".repeat(filled), Style::default().fg(bar_color)),
-        Span::styled("░".repeat(empty), Style::default().fg(BAR_BG)),
-    ]);
+    let last_line = if let Some(input) = worktree_input {
+        // Inline worktree branch input replacing the progress bar.
+        let label = "  ⑂ ";
+        let hint = "Enter/Esc";
+        let label_cols = 4usize;
+        let avail = area.width.saturating_sub(3) as usize; // inside left border
+        let has_hint = avail >= 26;
+        let hint_cols = if has_hint { hint.len() + 2 } else { 0 }; // +2 padding
+        let input_max = avail.saturating_sub(label_cols + hint_cols);
+        let input_display = {
+            let count = input.chars().count();
+            if count <= input_max {
+                format!("{input}▏")
+            } else {
+                let skip = count - input_max + 2; // +2 for … and ▏
+                format!("…{}▏", input.chars().skip(skip).collect::<String>())
+            }
+        };
+        let mut spans = vec![
+            Span::styled(label, Style::default().fg(accent)),
+            Span::styled(input_display, Style::default().fg(TEXT)),
+        ];
+        if has_hint {
+            let pad = avail.saturating_sub(label_cols + input.chars().count().min(input_max) + 1 + hint_cols);
+            spans.push(Span::raw(" ".repeat(pad + 2)));
+            spans.push(Span::styled(hint, Style::default().fg(DIM)));
+        }
+        Line::from(spans)
+    } else {
+        Line::from(vec![
+            Span::raw(indent),
+            Span::styled("▬".repeat(filled), Style::default().fg(bar_color)),
+            Span::styled("░".repeat(empty), Style::default().fg(BAR_BG)),
+        ])
+    };
 
     let mut content = vec![name_line, prompt_line];
     if let Some(bm) = bookmark_line {
         content.push(bm);
     }
-    content.extend([status_line, info_line, progress_line]);
+    content.extend([status_line, info_line, last_line]);
 
     // Left-only border: colored stripe acting as visual identity + selection indicator.
     // No box border — cleaner look, cards are separated by blank lines.

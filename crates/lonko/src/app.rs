@@ -1033,7 +1033,7 @@ impl App {
                     self.state.bookmark_mode = true;
                 }
             }
-            KeyCode::Char('g') => {
+            KeyCode::Char('g') if self.state.active_tab == Tab::Agents => {
                 self.launch_worktree_prompt();
             }
             KeyCode::Char('p') if self.state.active_tab == Tab::Agents => {
