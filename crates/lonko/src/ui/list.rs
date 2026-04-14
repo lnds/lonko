@@ -185,6 +185,9 @@ pub(crate) fn compute_scroll(
     bookmarks: &HashMap<String, String>,
 ) -> (usize, usize) {
     let total = visible.len();
+    if total == 0 || avail == 0 {
+        return (0, 0);
+    }
     let approx = cards_fitting(visible, 0, avail, header_flags, bookmarks).min(total);
     let half = approx / 2;
     let scroll = if selected < half {
