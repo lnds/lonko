@@ -1,3 +1,9 @@
+## v0.6.0 (2026-04-13)
+
+### Feat
+
+- **ui**: show branch-derived display name for grouped worktree agents
+
 ## v0.5.2 (2026-04-13)
 
 ### Fix
