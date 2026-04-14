@@ -130,7 +130,7 @@ pub fn run(cwd: &str, branch: &str) -> anyhow::Result<()> {
     tmux::create_session(&session_name, &wt_str)?;
 
     // Launch claude
-    tmux::send_command(&session_name, "claude")?;
+    tmux::send_command(&session_name, "clear && claude")?;
 
     // Switch to the new session
     let _ = Command::new("tmux")
@@ -231,7 +231,7 @@ pub fn run_from_pr(cwd: &str, pr: &PrInfo) -> anyhow::Result<()> {
     tmux::create_session(&session_name, &wt_str)?;
 
     // Show PR context before launching claude
-    let pr_msg = format!("echo '# PR #{}: {}' && claude", pr.number, pr.title.replace('\'', "'\\''"));
+    let pr_msg = format!("clear && echo '# PR #{}: {}' && claude", pr.number, pr.title.replace('\'', "'\\''"));
     tmux::send_command(&session_name, &pr_msg)?;
 
     // Switch to the new session

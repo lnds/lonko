@@ -149,7 +149,7 @@ pub fn run(cwd: &str, prompt: &str) -> anyhow::Result<()> {
     // The target "session:" means "active window in session" — safe because
     // derive_session_name only allows [a-zA-Z0-9_-].
     let escaped = prompt.replace('\'', "'\\''");
-    let cmd = format!("printf '%s\\n' '{}' | claude", escaped);
+    let cmd = format!("clear && printf '%s\\n' '{}' | claude", escaped);
     tmux::send_command(&format!("{}:", session_name), &cmd)?;
 
     // Switch the user to the new session.
