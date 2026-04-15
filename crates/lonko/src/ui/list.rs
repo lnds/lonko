@@ -94,30 +94,15 @@ fn session_color(position: usize) -> Color {
     SESSION_PALETTE[(position.saturating_sub(1)) % SESSION_PALETTE.len()]
 }
 
-/// Dim a color to ~65% brightness for subagent secondary elements.
-fn dim_color(c: Color) -> Color {
-    match c {
-        Color::Rgb(r, g, b) => Color::Rgb(
-            (r as f32 * 0.65) as u8,
-            (g as f32 * 0.65) as u8,
-            (b as f32 * 0.65) as u8,
-        ),
-        other => other,
-    }
-}
-
 // Each card: 5 content lines + 1 separator line (last card has no separator)
 const CARD_HEIGHT: u16 = 5;
-const SUB_CARD_HEIGHT: u16 = 3;
 const SEP_HEIGHT: u16 = 1;
 /// One-line group header drawn above the first card of a multi-agent group.
 pub(crate) const GROUP_HEADER_HEIGHT: u16 = 1;
 
-/// Card height for a session: main=5 (6 when bookmarked), sub=3.
+/// Card height for a session: 5 lines (6 when a bookmark note is shown).
 pub(crate) fn card_height(session: &Session, bookmarks: &HashMap<String, String>) -> u16 {
-    if session.is_subagent() {
-        SUB_CARD_HEIGHT
-    } else if bookmarks.contains_key(&session.cwd) {
+    if bookmarks.contains_key(&session.cwd) {
         CARD_HEIGHT + 1
     } else {
         CARD_HEIGHT
@@ -201,28 +186,10 @@ pub(crate) fn compute_scroll(
     (scroll, cards_visible)
 }
 
-/// Compute the 1-indexed main-agent position for a session.
-/// Subagents inherit their parent's position (returning 0 = no position number).
-fn main_position(visible: &[&Session], idx: usize) -> usize {
-    let session = visible[idx];
-    if session.is_subagent() {
-        return 0; // subagents don't get position numbers
-    }
-    // Count main agents up to and including this index
-    visible[..=idx].iter().filter(|s| !s.is_subagent()).count()
-}
-
-/// Find the parent's accent color for a subagent by looking back in the visible list.
-fn parent_accent(visible: &[&Session], idx: usize) -> Color {
-    let session = visible[idx];
-    if let Some(pid) = &session.parent_id {
-        // Find the parent's position
-        if let Some(pos) = visible.iter().position(|s| s.id == *pid) {
-            let parent_pos = main_position(visible, pos);
-            return session_color(parent_pos);
-        }
-    }
-    DIM
+/// 1-indexed position of the agent within the visible list.
+/// Used for keyboard shortcuts (`lonko focus N`) and accent color rotation.
+fn main_position(idx: usize) -> usize {
+    idx + 1
 }
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -271,9 +238,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     );
     let page = &visible[scroll..scroll + cards_visible];
 
-    // Pre-assign icons for main agents only (subagents don't get icons)
-    let main_sessions: Vec<&Session> = visible.iter().copied().filter(|s| !s.is_subagent()).collect();
-    let all_main_icons = assign_icons(&main_sessions);
+    // Pre-assign icons for all visible agents (subagents are filtered upstream).
+    let all_main_icons = assign_icons(&visible);
 
     // Reserve 1 line at top/bottom for scroll indicators when needed
     let need_top = scroll > 0;
@@ -323,7 +289,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         let mut ch = card_height(s, &state.bookmarks);
         // Bookmark editing on a card without a saved note needs an extra line.
         if global_idx == state.selected && state.bookmark_mode
-            && !state.bookmarks.contains_key(&s.cwd) && !s.is_subagent()
+            && !state.bookmarks.contains_key(&s.cwd)
         {
             ch += 1;
         }
@@ -351,31 +317,24 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             render_group_header(frame, chunks[hdr_idx], session);
         }
 
-        if session.is_subagent() {
-            let accent = parent_accent(&visible, global_idx);
-            render_subagent_card(frame, chunks[chunk_idx], session, SubCardCtx {
-                selected, focused, tick: state.tick, parent_accent: accent,
-            });
+        let position = main_position(global_idx);
+        let icon = all_main_icons.get(global_idx).copied().unwrap_or("🤖");
+        let bookmark_note = state.bookmarks.get(&session.cwd).map(|s| s.as_str());
+        let worktree_input = if selected && state.worktree_mode {
+            Some(state.worktree_input.as_str())
         } else {
-            let position = main_position(&visible, global_idx);
-            let main_idx = main_sessions.iter().position(|s| s.id == session.id).unwrap_or(0);
-            let icon = all_main_icons.get(main_idx).copied().unwrap_or("🤖");
-            let bookmark_note = state.bookmarks.get(&session.cwd).map(|s| s.as_str());
-            let worktree_input = if selected && state.worktree_mode {
-                Some(state.worktree_input.as_str())
-            } else {
-                None
-            };
-            let bookmark_input = if selected && state.bookmark_mode {
-                Some(state.bookmark_input.as_str())
-            } else {
-                None
-            };
-            render_session_card(frame, chunks[chunk_idx], session, CardCtx {
-                selected, focused, tick: state.tick, position, icon, bookmark_note,
-                worktree_input, bookmark_input,
-            });
-        }
+            None
+        };
+        let bookmark_input = if selected && state.bookmark_mode {
+            Some(state.bookmark_input.as_str())
+        } else {
+            None
+        };
+        let subagent_count = state.subagent_count_for(&session.id);
+        render_session_card(frame, chunks[chunk_idx], session, CardCtx {
+            selected, focused, tick: state.tick, position, icon, bookmark_note,
+            worktree_input, bookmark_input, subagent_count,
+        });
     }
 
     // Bottom indicator
@@ -401,17 +360,14 @@ struct CardCtx<'a> {
     worktree_input: Option<&'a str>,
     /// When Some, the card shows an inline bookmark input (editing or creating).
     bookmark_input: Option<&'a str>,
-}
-
-struct SubCardCtx {
-    selected: bool,
-    focused: bool,
-    tick: u64,
-    parent_accent: Color,
+    /// Number of live subagents spawned by this session. Rendered as a badge
+    /// next to the status label so subagents stay discoverable without
+    /// inflating the list with per-sub cards.
+    subagent_count: usize,
 }
 
 fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: CardCtx<'_>) {
-    let CardCtx { selected, focused, tick, position, icon, bookmark_note, worktree_input, bookmark_input } = ctx;
+    let CardCtx { selected, focused, tick, position, icon, bookmark_note, worktree_input, bookmark_input, subagent_count } = ctx;
     let accent = session_color(position);
     let is_waiting = session.status.is_waiting();
     let is_waiting_input = session.status.is_waiting_input();
@@ -600,7 +556,7 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
     } else {
         Span::raw("")
     };
-    let status_line = Line::from(vec![
+    let mut status_spans = vec![
         Span::raw(indent),
         spinner_span,
         Span::styled(session.status.label(), Style::default().fg(status_color)),
@@ -608,7 +564,14 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
             format!("  {}", session.elapsed_label()),
             Style::default().fg(DIM),
         ),
-    ]);
+    ];
+    if subagent_count > 0 {
+        status_spans.push(Span::styled(
+            format!("  ⇣{subagent_count}"),
+            Style::default().fg(SUBTLE),
+        ));
+    }
+    let status_line = Line::from(status_spans);
 
     // Line 4: model + context + cost
     let model_str = session
@@ -701,109 +664,6 @@ fn render_group_header(frame: &mut Frame, area: Rect, session: &Session) {
         ),
     ]);
     frame.render_widget(Paragraph::new(line), area);
-}
-
-/// Render a compact 3-line subagent card with tree connector.
-fn render_subagent_card(frame: &mut Frame, area: Rect, session: &Session, ctx: SubCardCtx) {
-    let SubCardCtx { selected, focused, tick, parent_accent } = ctx;
-    let accent = dim_color(parent_accent);
-
-    let bg_color = match (selected, focused) {
-        (_, true)     => COFFEE_BG,
-        (true, false) => NAV_BG,
-        _             => Color::Reset,
-    };
-
-    let status_color = match &session.status {
-        SessionStatus::WaitingForUser(_) => ORANGE,
-        SessionStatus::WaitingForInput => YELLOW,
-        SessionStatus::Running | SessionStatus::RunningTool(_) => dim_color(TEAL),
-        SessionStatus::Idle => DIM,
-        SessionStatus::Completed => dim_color(GREEN),
-        _ => DIM,
-    };
-
-    let status_glyph = session.status.glyph();
-
-    // Line 1: ╰ + status glyph + prompt text
-    let is_running = matches!(&session.status, SessionStatus::Running | SessionStatus::RunningTool(_));
-    let spinner_or_glyph = if is_running {
-        Span::styled(
-            format!("{} ", SPINNER[(tick / 3) as usize % SPINNER.len()]),
-            Style::default().fg(status_color),
-        )
-    } else {
-        Span::styled(format!("{} ", status_glyph), Style::default().fg(status_color))
-    };
-
-    let status_label = session.status.label();
-    // Budget for line 1: "  ╰ "(4) + name + " "(1) + glyph(2) + status + "  "(2) + prompt
-    let fixed_cols = 4 + 1 + 2 + UnicodeWidthStr::width(status_label.as_str()) + 2;
-    let line1_budget = area.width as usize;
-    let name_max = line1_budget.saturating_sub(fixed_cols) / 2; // half for name, half for prompt
-    let name_display = truncate_cols(session.display_name(), name_max.max(4));
-    let name_used = UnicodeWidthStr::width(name_display.as_str());
-
-    let max_prompt = line1_budget.saturating_sub(fixed_cols + name_used);
-    let prompt_text = session.last_prompt.as_deref()
-        .or(session.last_tool.as_deref())
-        .unwrap_or("");
-    let prompt_display = truncate_cols(prompt_text, max_prompt);
-
-    let line1 = Line::from(vec![
-        Span::styled("  ╰ ", Style::default().fg(accent)),
-        Span::styled(
-            name_display,
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        spinner_or_glyph,
-        Span::styled(status_label, Style::default().fg(status_color)),
-        Span::raw("  "),
-        Span::styled(prompt_display, Style::default().fg(DIM).add_modifier(Modifier::ITALIC)),
-    ]);
-
-    // Line 2: model + context + elapsed
-    let indent = "      ";
-    let model_str = session.model.as_deref()
-        .map(crate::agents::claude::short_model_name)
-        .unwrap_or_else(|| "?".into());
-    let ctx_k = session.context_used / 1000;
-    let line2 = Line::from(vec![
-        Span::raw(indent),
-        Span::styled(model_str, Style::default().fg(DIM)),
-        Span::styled(format!("  {}K ctx", ctx_k), Style::default().fg(DIM)),
-        Span::styled(format!("  {}", session.elapsed_label()), Style::default().fg(DIM)),
-    ]);
-
-    // Line 3: context progress bar
-    let bar_indent = "      ";
-    let inner_width = area.width.saturating_sub(8) as usize;
-    let filled = ((session.context_pct() * inner_width as f64) as usize).min(inner_width);
-    let empty = inner_width.saturating_sub(filled);
-    let bar_color = if session.context_pct() > 0.8 {
-        dim_color(ORANGE_PULSE)
-    } else if session.context_pct() > 0.5 {
-        dim_color(ORANGE)
-    } else {
-        DIM
-    };
-
-    let line3 = Line::from(vec![
-        Span::raw(bar_indent),
-        Span::styled("▬".repeat(filled), Style::default().fg(bar_color)),
-        Span::styled("░".repeat(empty), Style::default().fg(BAR_BG)),
-    ]);
-
-    let content = vec![line1, line2, line3];
-
-    // No left stripe for subagents — they live under the parent's visual umbrella
-    let block = Block::default()
-        .borders(Borders::NONE)
-        .style(Style::default().bg(bg_color));
-
-    let paragraph = Paragraph::new(content).block(block);
-    frame.render_widget(paragraph, area);
 }
 
 #[cfg(test)]

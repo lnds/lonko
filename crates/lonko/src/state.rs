@@ -433,11 +433,6 @@ impl AppState {
                 .filter(|s| {
                     s.display_name().to_lowercase().contains(&q)
                         || s.project_name.to_lowercase().contains(&q)
-                        || s.parent_id.as_ref().is_some_and(|pid| {
-                            self.sessions.iter().any(|p| {
-                                p.id == *pid && p.display_name().to_lowercase().contains(&q)
-                            })
-                        })
                 })
                 .collect()
         };
@@ -452,11 +447,22 @@ impl AppState {
         Self::sort_sessions(self.sessions.iter().collect())
     }
 
-    /// Sort sessions: group by repo root, float trunk branches to the top
-    /// of each group, and nest subagents under their parent.
+    /// Count how many subagents have `parent_id == parent` in the full
+    /// session list (irrespective of visibility / search filter).
+    pub fn subagent_count_for(&self, parent_id: &str) -> usize {
+        self.sessions
+            .iter()
+            .filter(|s| s.parent_id.as_deref() == Some(parent_id))
+            .count()
+    }
+
+    /// Sort sessions: drop subagents, group remaining main agents by
+    /// `repo_root`, and float trunk branches to the top of each group.
+    /// Subagents are intentionally excluded from the rendered list — they
+    /// surface as a count badge on their parent card instead, since per-sub
+    /// cards added too much noise to the agents list (LONKO-26).
     fn sort_sessions(sessions: Vec<&Session>) -> Vec<&Session> {
         let mains: Vec<&Session> = sessions.iter().copied().filter(|s| s.depth == 0).collect();
-        let subs: Vec<&Session> = sessions.iter().copied().filter(|s| s.depth > 0).collect();
 
         // Linear-scan grouping: preserves first-seen order of keys, and the
         // insertion order of mains within each key. `None` (non-git mains,
@@ -487,28 +493,10 @@ impl AppState {
             group_mains.sort_by_key(|s| if is_trunk_branch(s.branch.as_deref()) { 0 } else { 1 });
         }
 
-        let mut result: Vec<&Session> = Vec::with_capacity(sessions.len());
+        let mut result: Vec<&Session> = Vec::with_capacity(mains.len());
         for (_, group_mains) in &named {
-            for main in group_mains {
-                result.push(main);
-                let mut children: Vec<&Session> = subs
-                    .iter()
-                    .copied()
-                    .filter(|s| s.parent_id.as_deref() == Some(main.id.as_str()))
-                    .collect();
-                // Most recent subagent first.
-                children.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
-                result.extend(children);
-            }
+            result.extend(group_mains.iter().copied());
         }
-
-        // Orphaned subagents (parent not in the list)
-        for sub in &subs {
-            if !result.iter().any(|s| std::ptr::eq(*s, *sub)) {
-                result.push(sub);
-            }
-        }
-
         result
     }
 
@@ -1110,7 +1098,10 @@ mod tests {
     }
 
     #[test]
-    fn visible_sessions_subagents_stay_under_main_across_groups() {
+    fn visible_sessions_excludes_subagents() {
+        // Subagents do not appear in the visible list — they surface as a
+        // count badge on their parent (LONKO-26). The parent's subagent
+        // count is reported by `subagent_count_for`.
         let mut state = AppState::default();
         let mut a1 = main_with_repo("a1", Some("/r/alpha"));
         a1.last_activity = Instant::now();
@@ -1127,9 +1118,9 @@ mod tests {
             .iter()
             .map(|s| s.id.as_str())
             .collect();
-        // Visible order of groups is first-seen: b1 was inserted before
-        // a1, so beta comes first — but a1 still owns its subagent.
-        assert_eq!(ids, vec!["b1", "a1", "s1"]);
+        assert_eq!(ids, vec!["b1", "a1"]);
+        assert_eq!(state.subagent_count_for("a1"), 1);
+        assert_eq!(state.subagent_count_for("b1"), 0);
     }
 
     #[test]
