@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
+use crate::agents::claude;
+
 const HOOK_EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
@@ -29,10 +31,7 @@ fn hook_cmd() -> String {
 }
 
 fn settings_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".claude")
-        .join("settings.json")
+    claude::settings_file()
 }
 
 fn has_hook(groups: &[Value], cmd: &str) -> bool {

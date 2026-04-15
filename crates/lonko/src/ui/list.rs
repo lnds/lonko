@@ -614,10 +614,7 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
     let model_str = session
         .model
         .as_deref()
-        .map(|m| {
-            m.replace("claude-", "")
-              .replace("-20251001", "")
-        })
+        .map(crate::agents::claude::short_model_name)
         .unwrap_or_else(|| "?".into());
 
     let ctx_k = session.context_used / 1000;
@@ -769,7 +766,7 @@ fn render_subagent_card(frame: &mut Frame, area: Rect, session: &Session, ctx: S
     // Line 2: model + context + elapsed
     let indent = "      ";
     let model_str = session.model.as_deref()
-        .map(|m| m.replace("claude-", "").replace("-20251001", ""))
+        .map(crate::agents::claude::short_model_name)
         .unwrap_or_else(|| "?".into());
     let ctx_k = session.context_used / 1000;
     let line2 = Line::from(vec![

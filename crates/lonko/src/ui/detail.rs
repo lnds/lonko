@@ -41,7 +41,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     };
 
     let model_str = session.model.as_deref()
-        .map(|m| m.replace("claude-", "").replace("-20251001", ""))
+        .map(crate::agents::claude::short_model_name)
         .unwrap_or_else(|| "?".into());
 
     let branch_str = session.branch.as_deref()

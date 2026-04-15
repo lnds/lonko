@@ -9,13 +9,11 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::agents::claude;
 use crate::event::Event;
 
 pub fn socket_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".claude")
-        .join("lonko.sock")
+    claude::socket_path()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -96,10 +94,5 @@ fn parse_permission_command(line: &str) -> Option<String> {
     if parts.next()? != "permission" {
         return None;
     }
-    match parts.next()?.trim() {
-        "y" => Some("1".into()),
-        "w" => Some("2".into()),
-        "n" => Some("3".into()),
-        _ => None,
-    }
+    claude::permission_key_to_stdin(parts.next()?.trim()).map(|s| s.to_string())
 }

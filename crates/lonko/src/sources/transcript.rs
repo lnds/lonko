@@ -1,6 +1,8 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+use crate::agents::claude;
+
 pub struct TranscriptInfo {
     pub model: Option<String>,
     pub branch: Option<String>,
@@ -9,22 +11,8 @@ pub struct TranscriptInfo {
     pub context_tokens: u64,
 }
 
-/// Convert a cwd path to the Claude project slug.
-/// Claude replaces '/' and '.' with '-'.
-fn cwd_to_slug(cwd: &str) -> String {
-    cwd.chars()
-        .map(|c| if c == '/' || c == '.' { '-' } else { c })
-        .collect()
-}
-
 pub fn transcript_path(cwd: &str, session_id: &str) -> PathBuf {
-    let slug = cwd_to_slug(cwd);
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".claude")
-        .join("projects")
-        .join(slug)
-        .join(format!("{}.jsonl", session_id))
+    claude::transcript_path(cwd, session_id)
 }
 
 /// Clean a raw prompt string for display.

@@ -93,11 +93,12 @@ const DOTFILES: &[&str] = &[
 /// (settings.local.json, allowed permissions, etc.). Silently skips if
 /// the source has no `.claude/` or the destination already has one.
 fn copy_claude_config(source_root: &str, worktree_path: &Path) {
-    let src = PathBuf::from(source_root).join(".claude");
-    let dst = worktree_path.join(".claude");
+    let dir = crate::agents::claude::DIR_NAME;
+    let src = PathBuf::from(source_root).join(dir);
+    let dst = worktree_path.join(dir);
     if src.is_dir() && !dst.exists() {
         if let Err(e) = copy_dir_recursive(&src, &dst) {
-            eprintln!("warning: failed to copy .claude config to worktree: {e}");
+            eprintln!("warning: failed to copy {dir} config to worktree: {e}");
         }
     }
 }

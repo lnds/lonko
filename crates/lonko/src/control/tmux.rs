@@ -1,5 +1,7 @@
 use std::process::Command;
 
+use crate::agents::claude;
+
 /// Switch the current tmux client to the target pane's session/window.
 pub fn focus_pane(pane_id: &str) -> anyhow::Result<()> {
     let status = Command::new("tmux")
@@ -171,8 +173,8 @@ pub fn scan_claude_panes(own_pane: Option<&str>) -> Vec<ClaudePaneInfo> {
     // Build a map of pane_id → pane_current_path for fast lookup.
     let pane_paths = pane_path_map();
 
-    // Find all processes whose name is exactly "claude".
-    let Ok(output) = Command::new("pgrep").args(["-x", "claude"]).output() else {
+    // Find all processes whose name is exactly the agent binary (e.g. "claude").
+    let Ok(output) = Command::new("pgrep").args(["-x", claude::BINARY_NAME]).output() else {
         return vec![];
     };
     let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)

@@ -9,6 +9,7 @@ use notify::{Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode,
 use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::agents::claude;
 use crate::event::Event;
 
 #[derive(Debug, Deserialize)]
@@ -20,10 +21,7 @@ pub struct SessionFile {
 }
 
 fn sessions_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".claude")
-        .join("sessions")
+    claude::sessions_dir()
 }
 
 fn pid_from_path(path: &Path) -> Option<u32> {
