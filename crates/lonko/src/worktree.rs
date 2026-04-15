@@ -668,11 +668,24 @@ mod tests {
         let repo = tmp.join("repo");
         assert!(Command::new("git").args(["init", "--bare"]).arg(&bare).output().unwrap().status.success());
         assert!(Command::new("git").args(["init"]).arg(&repo).output().unwrap().status.success());
-        assert!(Command::new("git").args(["-C", repo.to_str().unwrap(), "remote", "add", "origin", bare.to_str().unwrap()]).output().unwrap().status.success());
+        // Isolate from the developer's global git config so the test does not depend
+        // on their signing key, user identity, or hooks being available.
+        let repo_str = repo.to_str().unwrap();
+        for (k, v) in [
+            ("commit.gpgsign", "false"),
+            ("tag.gpgsign", "false"),
+            ("user.email", "test@example.com"),
+            ("user.name", "lonko-test"),
+        ] {
+            assert!(Command::new("git")
+                .args(["-C", repo_str, "config", "--local", k, v])
+                .output().unwrap().status.success());
+        }
+        assert!(Command::new("git").args(["-C", repo_str, "remote", "add", "origin", bare.to_str().unwrap()]).output().unwrap().status.success());
         // Need at least one commit so git push has something to work with.
         std::fs::write(repo.join("f.txt"), "x").unwrap();
-        assert!(Command::new("git").args(["-C", repo.to_str().unwrap(), "add", "."]).output().unwrap().status.success());
-        assert!(Command::new("git").args(["-C", repo.to_str().unwrap(), "commit", "-m", "init"]).output().unwrap().status.success());
+        assert!(Command::new("git").args(["-C", repo_str, "add", "."]).output().unwrap().status.success());
+        assert!(Command::new("git").args(["-C", repo_str, "commit", "-m", "init"]).output().unwrap().status.success());
         assert!(Command::new("git").args(["-C", repo.to_str().unwrap(), "push", "origin", "HEAD"]).output().unwrap().status.success());
 
         assert!(delete_remote_branch(repo.to_str().unwrap(), "nonexistent-branch-xyz-999").is_err());
