@@ -138,6 +138,34 @@ pub(crate) fn compute_header_flags(visible: &[&Session]) -> Vec<bool> {
     flags
 }
 
+/// For each session in `visible`, returns `Some(repo_root)` when it belongs
+/// to a multi-main group (the same cluster that earns a group header), or
+/// `None` for solo mains / orphans. Subagents inherit their parent's repo
+/// so they get the same key and render under the same visual umbrella.
+///
+/// Used to draw a connecting gutter bar on the sidebar's left edge that
+/// ties together every card of a group, including subagents.
+pub(crate) fn compute_group_keys<'a>(visible: &[&'a Session]) -> Vec<Option<&'a str>> {
+    use std::collections::HashMap;
+    let mut main_counts: HashMap<Option<&str>, usize> = HashMap::new();
+    for s in visible.iter() {
+        if !s.is_subagent() {
+            *main_counts.entry(s.repo_root.as_deref()).or_insert(0) += 1;
+        }
+    }
+    visible
+        .iter()
+        .map(|s| {
+            let key = s.repo_root.as_deref();
+            if main_counts.get(&key).copied().unwrap_or(0) >= 2 {
+                key
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Total height for the card at `visible[idx]`, including the group header
 /// when `header_flags[idx]` is set.
 fn slot_height(visible: &[&Session], idx: usize, header_flags: &[bool], bookmarks: &HashMap<String, String>) -> u16 {
@@ -232,6 +260,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let total = visible.len();
     let header_flags = compute_header_flags(&visible);
+    let group_keys = compute_group_keys(&visible);
 
     let (scroll, cards_visible) = compute_scroll(
         &visible, state.selected, list_area.height, &header_flags, &state.bookmarks,
@@ -301,10 +330,31 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         }
     }
 
+    // Reserve a 1-col left gutter for group connector bars. Always reserved
+    // (even when no groups exist) so cards stay horizontally aligned as
+    // groups form and dissolve.
+    let cards_split = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(outer[1]);
+    let gutter_area = cards_split[0];
+    let cards_area_inner = cards_split[1];
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(card_constraints)
-        .split(outer[1]);
+        .split(cards_area_inner);
+
+    // Build per-row gutter glyphs: `│` inside a multi-agent group, blank
+    // elsewhere. A separator row between two cards of the SAME group
+    // extends the bar; a separator between different groups breaks it.
+    let gutter_lines: Vec<Line> = build_gutter_lines(
+        page, scroll, &group_keys, &header_flags, &state.bookmarks, state,
+    );
+    frame.render_widget(
+        Paragraph::new(gutter_lines),
+        gutter_area,
+    );
 
     for (i, session) in page.iter().enumerate() {
         let (header_idx, chunk_idx) = slot_chunks[i];
@@ -653,6 +703,53 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
     frame.render_widget(paragraph, area);
 }
 
+/// Build the left-gutter lines that run alongside the card chunks in
+/// `page`. Each line is either `│` (inside a multi-agent group) or blank.
+/// The order must match the vertical chunks produced by the card layout:
+/// `[header?, card, sep?]` per slot, matching `slot_height`.
+fn build_gutter_lines(
+    page: &[&Session],
+    scroll: usize,
+    group_keys: &[Option<&str>],
+    header_flags: &[bool],
+    bookmarks: &HashMap<String, String>,
+    state: &AppState,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let bar = || Line::from(Span::styled("│", Style::default().fg(BORDER_INACTIVE)));
+    let blank = || Line::from(Span::raw(" "));
+
+    for (i, session) in page.iter().enumerate() {
+        let global_idx = scroll + i;
+        let in_group = group_keys[global_idx].is_some();
+
+        if header_flags[global_idx] {
+            // The header row carries the `▾ repo` label; keep the gutter
+            // blank here so the bar visually starts at the first card and
+            // the header "hangs" above it.
+            lines.push(blank());
+        }
+
+        let mut ch = card_height(session, bookmarks);
+        if global_idx == state.selected && state.bookmark_mode
+            && !bookmarks.contains_key(&session.cwd) && !session.is_subagent()
+        {
+            ch += 1;
+        }
+        for _ in 0..ch {
+            lines.push(if in_group { bar() } else { blank() });
+        }
+
+        if i < page.len() - 1 {
+            let next_key = group_keys[scroll + i + 1];
+            let connect = group_keys[global_idx].is_some()
+                && group_keys[global_idx] == next_key;
+            lines.push(if connect { bar() } else { blank() });
+        }
+    }
+    lines
+}
+
 /// Render a one-line group header above the first card of a multi-agent
 /// group. Label resolution lives on `Session::group_label`.
 fn render_group_header(frame: &mut Frame, area: Rect, session: &Session) {
@@ -722,6 +819,30 @@ mod tests {
 
         let flags = compute_header_flags(&visible);
         assert_eq!(flags, vec![false, false]);
+    }
+
+    #[test]
+    fn group_keys_multi_main_cluster_marks_all_members() {
+        let s0 = main_with_repo("a1", "/r/alpha");
+        let s1 = subagent_of("sub", "a1", "/r/alpha");
+        let s2 = main_with_repo("a2", "/r/alpha");
+        let s3 = main_with_repo("solo", "/r/solo");
+        let visible = vec![&s0, &s1, &s2, &s3];
+
+        let keys = compute_group_keys(&visible);
+        assert_eq!(
+            keys,
+            vec![Some("/r/alpha"), Some("/r/alpha"), Some("/r/alpha"), None]
+        );
+    }
+
+    #[test]
+    fn group_keys_all_solo_returns_none() {
+        let s0 = main_with_repo("a", "/r/alpha");
+        let s1 = main_with_repo("b", "/r/beta");
+        let visible = vec![&s0, &s1];
+        let keys = compute_group_keys(&visible);
+        assert_eq!(keys, vec![None, None]);
     }
 
     #[test]
