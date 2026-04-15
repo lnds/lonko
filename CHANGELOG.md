@@ -1,3 +1,13 @@
+## v0.11.0 (2026-04-15)
+
+### Feat
+
+- **ui**: replace subagent cards with a count badge on parent
+
+### Refactor
+
+- centralise Claude-specific paths in agents::claude
+
 ## v0.10.2 (2026-04-14)
 
 ### Fix
