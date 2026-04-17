@@ -167,19 +167,23 @@ pub(crate) fn compute_group_keys<'a>(visible: &[&'a Session]) -> Vec<Option<&'a 
 }
 
 /// Total height for the card at `visible[idx]`, including the group header
-/// when `header_flags[idx]` is set.
-fn slot_height(visible: &[&Session], idx: usize, header_flags: &[bool], bookmarks: &HashMap<String, String>) -> u16 {
+/// when `header_flags[idx]` is set. When `collapsed_flags[idx]` is true
+/// the card is a collapsed-group placeholder: only the header is shown.
+fn slot_height(visible: &[&Session], idx: usize, header_flags: &[bool], collapsed_flags: &[bool], bookmarks: &HashMap<String, String>) -> u16 {
     let hdr = if header_flags[idx] { GROUP_HEADER_HEIGHT } else { 0 };
+    if collapsed_flags[idx] {
+        return hdr;
+    }
     hdr + card_height(visible[idx], bookmarks)
 }
 
 /// Compute how many cards fit from `start` in `sessions` given `avail` lines,
 /// accounting for any group headers rendered inline.
-pub(crate) fn cards_fitting(sessions: &[&Session], start: usize, avail: u16, header_flags: &[bool], bookmarks: &HashMap<String, String>) -> usize {
+pub(crate) fn cards_fitting(sessions: &[&Session], start: usize, avail: u16, header_flags: &[bool], collapsed_flags: &[bool], bookmarks: &HashMap<String, String>) -> usize {
     let mut used = 0u16;
     let mut count = 0;
     for i in start..sessions.len() {
-        let h = slot_height(sessions, i, header_flags, bookmarks) + if count > 0 { SEP_HEIGHT } else { 0 };
+        let h = slot_height(sessions, i, header_flags, collapsed_flags, bookmarks) + if count > 0 { SEP_HEIGHT } else { 0 };
         if used + h > avail { break; }
         used += h;
         count += 1;
@@ -195,13 +199,14 @@ pub(crate) fn compute_scroll(
     selected: usize,
     avail: u16,
     header_flags: &[bool],
+    collapsed_flags: &[bool],
     bookmarks: &HashMap<String, String>,
 ) -> (usize, usize) {
     let total = visible.len();
     if total == 0 || avail == 0 {
         return (0, 0);
     }
-    let approx = cards_fitting(visible, 0, avail, header_flags, bookmarks).min(total);
+    let approx = cards_fitting(visible, 0, avail, header_flags, collapsed_flags, bookmarks).min(total);
     let half = approx / 2;
     let scroll = if selected < half {
         0
@@ -210,7 +215,7 @@ pub(crate) fn compute_scroll(
     } else {
         selected - half
     };
-    let cards_visible = cards_fitting(visible, scroll, avail, header_flags, bookmarks).min(total - scroll);
+    let cards_visible = cards_fitting(visible, scroll, avail, header_flags, collapsed_flags, bookmarks).min(total - scroll);
     (scroll, cards_visible)
 }
 
@@ -259,11 +264,35 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 
     let total = visible.len();
-    let header_flags = compute_header_flags(&visible);
+    let mut header_flags = compute_header_flags(&visible);
     let group_keys = compute_group_keys(&visible);
 
+    // Force header_flags for collapsed groups: after filtering, only 1
+    // session remains visible so compute_header_flags won't mark it as
+    // a multi-agent group. Check the *full* session count instead.
+    for (i, s) in visible.iter().enumerate() {
+        if let Some(repo) = s.repo_root.as_deref() {
+            if state.is_group_collapsed(repo) && state.group_agent_count(repo) >= 2 {
+                header_flags[i] = true;
+            }
+        }
+    }
+
+    // A collapsed flag is true when the session is a placeholder for a
+    // collapsed group: it has a header but no card.
+    let collapsed_flags: Vec<bool> = visible
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            header_flags[i]
+                && s.repo_root
+                    .as_deref()
+                    .is_some_and(|r| state.is_group_collapsed(r))
+        })
+        .collect();
+
     let (scroll, cards_visible) = compute_scroll(
-        &visible, state.selected, list_area.height, &header_flags, &state.bookmarks,
+        &visible, state.selected, list_area.height, &header_flags, &collapsed_flags, &state.bookmarks,
     );
     let page = &visible[scroll..scroll + cards_visible];
 
@@ -303,27 +332,31 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     // before the first card of any multi-agent group. For each page element
     // we remember its (optional header, card) chunk indices so the render
     // loop can find them back without re-deriving the layout.
+    // Collapsed groups get a header but no card (card chunk has 0 height).
     let mut card_constraints: Vec<Constraint> = Vec::with_capacity(page.len() * 3);
-    let mut slot_chunks: Vec<(Option<usize>, usize)> = Vec::with_capacity(page.len());
+    let mut slot_chunks: Vec<(Option<usize>, Option<usize>)> = Vec::with_capacity(page.len());
     for (i, s) in page.iter().enumerate() {
         let global_idx = scroll + i;
-        // Must agree with `slot_height` so `cards_fitting` reserves the right
-        // amount of space.
+        let is_collapsed = collapsed_flags[global_idx];
         let header_idx = if header_flags[global_idx] {
             card_constraints.push(Constraint::Length(GROUP_HEADER_HEIGHT));
             Some(card_constraints.len() - 1)
         } else {
             None
         };
-        let mut ch = card_height(s, &state.bookmarks);
-        // Bookmark editing on a card without a saved note needs an extra line.
-        if global_idx == state.selected && state.bookmark_mode
-            && !state.bookmarks.contains_key(&s.cwd)
-        {
-            ch += 1;
-        }
-        card_constraints.push(Constraint::Length(ch));
-        let card_idx = card_constraints.len() - 1;
+        let card_idx = if is_collapsed {
+            // Collapsed: no card, only header
+            None
+        } else {
+            let mut ch = card_height(s, &state.bookmarks);
+            if global_idx == state.selected && state.bookmark_mode
+                && !state.bookmarks.contains_key(&s.cwd)
+            {
+                ch += 1;
+            }
+            card_constraints.push(Constraint::Length(ch));
+            Some(card_constraints.len() - 1)
+        };
         slot_chunks.push((header_idx, card_idx));
         if i < page.len() - 1 {
             card_constraints.push(Constraint::Length(SEP_HEIGHT));
@@ -345,35 +378,50 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         let a = scroll + i;
         let b = a + 1;
         if group_keys[a].is_some() && group_keys[a] == group_keys[b] {
-            let (_, card_idx) = slot_chunks[i];
-            let sep_idx = card_idx + 1;
-            if sep_idx < chunks.len() {
-                let sep = chunks[sep_idx];
-                if sep.width > 0 && sep.height > 0 {
-                    let bar_rect = Rect { x: sep.x, y: sep.y, width: 1, height: 1 };
-                    frame.render_widget(
-                        Paragraph::new(Line::from(Span::styled(
-                            "│",
-                            Style::default().fg(BORDER_INACTIVE),
-                        ))),
-                        bar_rect,
-                    );
+            if let (_, Some(card_idx)) = slot_chunks[i] {
+                let sep_idx = card_idx + 1;
+                if sep_idx < chunks.len() {
+                    let sep = chunks[sep_idx];
+                    if sep.width > 0 && sep.height > 0 {
+                        let bar_rect = Rect { x: sep.x, y: sep.y, width: 1, height: 1 };
+                        frame.render_widget(
+                            Paragraph::new(Line::from(Span::styled(
+                                "│",
+                                Style::default().fg(BORDER_INACTIVE),
+                            ))),
+                            bar_rect,
+                        );
+                    }
                 }
             }
         }
     }
 
     for (i, session) in page.iter().enumerate() {
-        let (header_idx, chunk_idx) = slot_chunks[i];
-        if chunk_idx >= chunks.len() { break; }
+        let (header_idx, card_idx) = slot_chunks[i];
         let global_idx = scroll + i;
         let selected = global_idx == state.selected;
-        let focused = state.focused_session_id.as_deref() == Some(session.id.as_str());
+        let is_collapsed = collapsed_flags[global_idx];
 
         if let Some(hdr_idx) = header_idx {
-            render_group_header(frame, chunks[hdr_idx], session);
+            if hdr_idx < chunks.len() {
+                let agent_count = session
+                    .repo_root
+                    .as_deref()
+                    .map(|r| state.group_agent_count(r))
+                    .unwrap_or(0);
+                render_group_header(frame, chunks[hdr_idx], session, is_collapsed, selected, agent_count);
+            }
         }
 
+        // Collapsed groups show only the header, no card.
+        if is_collapsed {
+            continue;
+        }
+
+        let Some(chunk_idx) = card_idx else { continue };
+        if chunk_idx >= chunks.len() { break; }
+        let focused = state.focused_session_id.as_deref() == Some(session.id.as_str());
         let position = main_position(global_idx);
         let icon = all_main_icons.get(global_idx).copied().unwrap_or("🤖");
         let bookmark_note = state.bookmarks.get(&session.cwd).map(|s| s.as_str());
@@ -711,16 +759,39 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
 }
 
 /// Render a one-line group header above the first card of a multi-agent
-/// group. Label resolution lives on `Session::group_label`.
-fn render_group_header(frame: &mut Frame, area: Rect, session: &Session) {
-    let line = Line::from(vec![
-        Span::styled(" ▾ ", Style::default().fg(DIM)),
+/// group. Shows `▶` when collapsed, `▾` when expanded. When collapsed,
+/// appends the agent count so the user knows how many are hidden.
+fn render_group_header(
+    frame: &mut Frame,
+    area: Rect,
+    session: &Session,
+    collapsed: bool,
+    selected: bool,
+    agent_count: usize,
+) {
+    let chevron = if collapsed { "▶" } else { "▾" };
+    let bg = if selected && collapsed { NAV_BG } else { Color::Reset };
+    let stripe_color = if selected { SUBTLE } else { BORDER_INACTIVE };
+    let mut spans = vec![
+        Span::styled(format!("{} ", chevron), Style::default().fg(DIM)),
         Span::styled(
             session.group_label(),
             Style::default().fg(SUBTLE).add_modifier(Modifier::BOLD),
         ),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    ];
+    if collapsed {
+        spans.push(Span::styled(
+            format!("  {agent_count}"),
+            Style::default().fg(DIM),
+        ));
+    }
+    let line = Line::from(spans);
+    let block = Block::default()
+        .borders(Borders::LEFT)
+        .border_type(if selected { BorderType::Thick } else { BorderType::Plain })
+        .border_style(Style::default().fg(stripe_color))
+        .style(Style::default().bg(bg));
+    frame.render_widget(Paragraph::new(line).block(block), area);
 }
 
 #[cfg(test)]

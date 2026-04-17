@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::sources::transcript::TranscriptInfo;
@@ -301,6 +301,9 @@ pub struct AppState {
     pub new_agent_resolved_cwd: String,
     /// Which field has focus in the new-agent popup.
     pub new_agent_focus: NewAgentField,
+    /// Repo-root keys of groups that are collapsed in the Agents tab.
+    /// When collapsed, only a summary header is shown instead of all cards.
+    pub collapsed_groups: HashSet<String>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
@@ -413,6 +416,7 @@ impl Default for AppState {
             new_agent_cwd_input: String::new(),
             new_agent_resolved_cwd: String::new(),
             new_agent_focus: NewAgentField::default(),
+            collapsed_groups: HashSet::new(),
         }
     }
 }
@@ -437,7 +441,25 @@ impl AppState {
                 .collect()
         };
 
-        Self::sort_sessions(filtered)
+        let sorted = Self::sort_sessions(filtered);
+
+        // Collapsed groups: keep only the first session as a placeholder
+        // so the header still renders and is selectable for toggling.
+        if self.collapsed_groups.is_empty() {
+            return sorted;
+        }
+        let mut seen: HashSet<&str> = HashSet::new();
+        sorted
+            .into_iter()
+            .filter(|s| {
+                if let Some(repo) = s.repo_root.as_deref() {
+                    if self.collapsed_groups.contains(repo) {
+                        return seen.insert(repo);
+                    }
+                }
+                true
+            })
+            .collect()
     }
 
     /// All sessions in canonical display order (grouped by repo, trunk first)
@@ -498,6 +520,27 @@ impl AppState {
             result.extend(group_mains.iter().copied());
         }
         result
+    }
+
+    /// Toggle collapse state for a repo-root group.
+    pub fn toggle_group_collapse(&mut self, repo_root: &str) {
+        if !self.collapsed_groups.remove(repo_root) {
+            self.collapsed_groups.insert(repo_root.to_string());
+        }
+    }
+
+    /// Whether a repo-root group is currently collapsed.
+    pub fn is_group_collapsed(&self, repo_root: &str) -> bool {
+        self.collapsed_groups.contains(repo_root)
+    }
+
+    /// Count main agents (depth 0) sharing a given repo_root across all
+    /// sessions (ignoring search filter and collapse state).
+    pub fn group_agent_count(&self, repo_root: &str) -> usize {
+        self.sessions
+            .iter()
+            .filter(|s| s.depth == 0 && s.repo_root.as_deref() == Some(repo_root))
+            .count()
     }
 
     pub fn visible_len(&self) -> usize {

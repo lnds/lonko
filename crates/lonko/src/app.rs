@@ -250,9 +250,26 @@ impl App {
         if total == 0 { return; }
 
         let list_h = h.saturating_sub(3 + 1);
-        let header_flags = ui::list::compute_header_flags(&visible);
+        let mut header_flags = ui::list::compute_header_flags(&visible);
+        for (i, s) in visible.iter().enumerate() {
+            if let Some(repo) = s.repo_root.as_deref() {
+                if self.state.is_group_collapsed(repo) && self.state.group_agent_count(repo) >= 2 {
+                    header_flags[i] = true;
+                }
+            }
+        }
+        let collapsed_flags: Vec<bool> = visible
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                header_flags[i]
+                    && s.repo_root
+                        .as_deref()
+                        .is_some_and(|r| self.state.is_group_collapsed(r))
+            })
+            .collect();
         let (scroll, cards_visible) = ui::list::compute_scroll(
-            &visible, self.state.selected, list_h, &header_flags, &self.state.bookmarks,
+            &visible, self.state.selected, list_h, &header_flags, &collapsed_flags, &self.state.bookmarks,
         );
 
         // Linear scan to find which card was clicked based on row offset from y=3.
@@ -267,7 +284,17 @@ impl App {
                 y_acc += 1; // separator between cards (not before first)
             }
             if header_flags[global] {
-                y_acc += ui::list::GROUP_HEADER_HEIGHT;
+                let hdr_h = ui::list::GROUP_HEADER_HEIGHT;
+                if collapsed_flags[global] {
+                    // Collapsed: the header IS the clickable target
+                    if click_y >= y_acc && click_y < y_acc + hdr_h {
+                        card_idx = Some(i);
+                        break;
+                    }
+                    y_acc += hdr_h;
+                    continue;
+                }
+                y_acc += hdr_h;
             }
             let ch = ui::list::card_height(s, &self.state.bookmarks);
             if click_y >= y_acc && click_y < y_acc + ch {
@@ -999,6 +1026,16 @@ impl App {
                 self.state.active_tab = Tab::Sessions;
                 self.state.tmux_window_cursor = None;
                 self.state.tmux_expanded = false;
+            }
+            KeyCode::Char(' ')
+                if self.state.active_tab == Tab::Agents =>
+            {
+                // Toggle collapse on the selected session's repo group.
+                if let Some(session) = self.state.selected_session() {
+                    if let Some(repo) = session.repo_root.clone() {
+                        self.state.toggle_group_collapse(&repo);
+                    }
+                }
             }
             KeyCode::Char(' ')
                 if self.state.active_tab == Tab::Sessions =>
