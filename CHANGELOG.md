@@ -1,3 +1,9 @@
+## v0.13.0 (2026-04-17)
+
+### Feat
+
+- **ui**: collapsible repo groups in Agents tab
+
 ## v0.12.1 (2026-04-17)
 
 ### Fix
