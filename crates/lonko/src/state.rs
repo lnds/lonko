@@ -1006,6 +1006,28 @@ impl AppState {
     pub fn remote_item_count(&self) -> usize {
         self.remote_hosts.iter().map(|h| h.sessions.len().max(1)).sum()
     }
+
+    /// Return the (hostname, session_name) for the currently selected remote item.
+    /// Returns None if the selection points to an empty-host placeholder.
+    pub fn selected_remote_session(&self) -> Option<(&str, &str)> {
+        let mut idx = 0;
+        for host in &self.remote_hosts {
+            if host.sessions.is_empty() {
+                if idx == self.remote_selected {
+                    return None; // empty host placeholder
+                }
+                idx += 1;
+            } else {
+                for session in &host.sessions {
+                    if idx == self.remote_selected {
+                        return Some((&host.hostname, &session.name));
+                    }
+                    idx += 1;
+                }
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]

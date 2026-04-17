@@ -477,6 +477,15 @@ impl App {
             .status();
     }
 
+    /// Open a new tmux window that SSH-attaches to the selected remote session.
+    fn attach_remote_session(&self) {
+        let Some((host, session_name)) = self.state.selected_remote_session() else { return };
+        let ssh_cmd = format!("ssh {} -t 'tmux attach-session -t {}'", host, session_name);
+        let _ = std::process::Command::new("tmux")
+            .args(["new-window", "-n", &format!("{}:{}", host, session_name), "--", "sh", "-c", &ssh_cmd])
+            .status();
+    }
+
     /// Returns true when lonko is the only pane left in its current tmux session,
     /// so it should exit cleanly instead of lingering as a solitary pane/window.
     /// Skips lonko-internal sessions (lonko-tray, floating-*) where lonko is meant
@@ -1152,6 +1161,8 @@ impl App {
                 if self.state.active_tab == Tab::Sessions {
                     self.focus_tmux_session();
                     self.state.tmux_expanded = false;
+                } else if self.state.active_tab == Tab::Remote {
+                    self.attach_remote_session();
                 } else {
                     self.focus_selected();
                 }
