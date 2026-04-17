@@ -330,31 +330,38 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         }
     }
 
-    // Reserve a 1-col left gutter for group connector bars. Always reserved
-    // (even when no groups exist) so cards stay horizontally aligned as
-    // groups form and dissolve.
-    let cards_split = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(outer[1]);
-    let gutter_area = cards_split[0];
-    let cards_area_inner = cards_split[1];
-
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(card_constraints)
-        .split(cards_area_inner);
+        .split(outer[1]);
 
-    // Build per-row gutter glyphs: `│` inside a multi-agent group, blank
-    // elsewhere. A separator row between two cards of the SAME group
-    // extends the bar; a separator between different groups breaks it.
-    let gutter_lines: Vec<Line> = build_gutter_lines(
-        page, scroll, &group_keys, &header_flags, &state.bookmarks, state,
-    );
-    frame.render_widget(
-        Paragraph::new(gutter_lines),
-        gutter_area,
-    );
+    // Connect cards of the same multi-main group by drawing `│` at column 0
+    // of the separator row between them. The cards themselves already have
+    // a `Borders::LEFT` stripe at that column, so the bar on the sep row
+    // visually stitches those stripes into one continuous vertical line —
+    // no extra gutter column needed.
+    for (i, _) in page.iter().enumerate() {
+        if i + 1 >= page.len() { break; }
+        let a = scroll + i;
+        let b = a + 1;
+        if group_keys[a].is_some() && group_keys[a] == group_keys[b] {
+            let (_, card_idx) = slot_chunks[i];
+            let sep_idx = card_idx + 1;
+            if sep_idx < chunks.len() {
+                let sep = chunks[sep_idx];
+                if sep.width > 0 && sep.height > 0 {
+                    let bar_rect = Rect { x: sep.x, y: sep.y, width: 1, height: 1 };
+                    frame.render_widget(
+                        Paragraph::new(Line::from(Span::styled(
+                            "│",
+                            Style::default().fg(BORDER_INACTIVE),
+                        ))),
+                        bar_rect,
+                    );
+                }
+            }
+        }
+    }
 
     for (i, session) in page.iter().enumerate() {
         let (header_idx, chunk_idx) = slot_chunks[i];
@@ -701,53 +708,6 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
 
     let paragraph = Paragraph::new(content).block(block);
     frame.render_widget(paragraph, area);
-}
-
-/// Build the left-gutter lines that run alongside the card chunks in
-/// `page`. Each line is either `│` (inside a multi-agent group) or blank.
-/// The order must match the vertical chunks produced by the card layout:
-/// `[header?, card, sep?]` per slot, matching `slot_height`.
-fn build_gutter_lines(
-    page: &[&Session],
-    scroll: usize,
-    group_keys: &[Option<&str>],
-    header_flags: &[bool],
-    bookmarks: &HashMap<String, String>,
-    state: &AppState,
-) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let bar = || Line::from(Span::styled("│", Style::default().fg(BORDER_INACTIVE)));
-    let blank = || Line::from(Span::raw(" "));
-
-    for (i, session) in page.iter().enumerate() {
-        let global_idx = scroll + i;
-        let in_group = group_keys[global_idx].is_some();
-
-        if header_flags[global_idx] {
-            // The header row carries the `▾ repo` label; keep the gutter
-            // blank here so the bar visually starts at the first card and
-            // the header "hangs" above it.
-            lines.push(blank());
-        }
-
-        let mut ch = card_height(session, bookmarks);
-        if global_idx == state.selected && state.bookmark_mode
-            && !bookmarks.contains_key(&session.cwd) && !session.is_subagent()
-        {
-            ch += 1;
-        }
-        for _ in 0..ch {
-            lines.push(if in_group { bar() } else { blank() });
-        }
-
-        if i < page.len() - 1 {
-            let next_key = group_keys[scroll + i + 1];
-            let connect = group_keys[global_idx].is_some()
-                && group_keys[global_idx] == next_key;
-            lines.push(if connect { bar() } else { blank() });
-        }
-    }
-    lines
 }
 
 /// Render a one-line group header above the first card of a multi-agent
