@@ -449,6 +449,16 @@ impl App {
             Tab::Sessions => {
                 self.state.navigate_tmux_session(delta);
             }
+            Tab::Remote => {
+                let count = self.state.remote_item_count();
+                if count > 0 {
+                    if delta > 0 {
+                        self.state.remote_selected = (self.state.remote_selected + 1).min(count - 1);
+                    } else {
+                        self.state.remote_selected = self.state.remote_selected.saturating_sub(1);
+                    }
+                }
+            }
         }
     }
 
@@ -764,6 +774,9 @@ impl App {
                 self.state.term_height = h;
             }
             Event::PermissionResponse(key) => self.send_permission(&key),
+            Event::RemoteSnapshot(snapshot) => {
+                self.on_remote_snapshot(snapshot);
+            }
         }
         Ok(false)
     }
@@ -823,6 +836,69 @@ impl App {
                 .filter_map(|s| s.tmux_pane.clone())
                 .collect();
             tmux_scanner::scan(tx, &known_panes, self.state.own_pane.as_deref());
+        }
+
+        // Poll remote Tailnet hosts every 10 seconds, only while the Remote tab is active.
+        if self.state.active_tab == Tab::Remote
+            && self.state.tick.is_multiple_of(100)
+            && let Some(ref tx) = self.scan_tx
+        {
+            let tx = tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let peers = match crate::sources::tailnet::list_online_peers() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!("tailnet discovery failed: {e}");
+                        return;
+                    }
+                };
+                for peer in peers {
+                    let tx = tx.clone();
+                    let host = peer.hostname.clone();
+                    match crate::sources::remote_tmux::poll_host(&host) {
+                        Ok(snapshot) => {
+                            let _ = tx.send(Event::RemoteSnapshot(snapshot));
+                        }
+                        Err(e) => {
+                            tracing::debug!("remote poll {host} failed: {e}");
+                            let _ = tx.send(Event::RemoteSnapshot(
+                                crate::sources::remote_tmux::RemoteSnapshot {
+                                    host: host.clone(),
+                                    sessions: vec![],
+                                    is_error: true,
+                                },
+                            ));
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    fn on_remote_snapshot(&mut self, snapshot: crate::sources::remote_tmux::RemoteSnapshot) {
+        let is_error = snapshot.is_error;
+        if let Some(host) = self.state.remote_hosts.iter_mut().find(|h| h.hostname == snapshot.host) {
+            if is_error {
+                host.status = crate::state::HostStatus::Unreachable;
+            } else {
+                host.status = crate::state::HostStatus::Online;
+                host.sessions = snapshot.sessions;
+            }
+        } else {
+            self.state.remote_hosts.push(crate::state::RemoteHost {
+                hostname: snapshot.host,
+                status: crate::state::HostStatus::Online,
+                sessions: snapshot.sessions,
+            });
+            // Keep hosts sorted alphabetically.
+            self.state.remote_hosts.sort_by(|a, b| {
+                a.hostname.to_ascii_lowercase().cmp(&b.hostname.to_ascii_lowercase())
+            });
+        }
+        // Clamp selection.
+        let count = self.state.remote_item_count();
+        if count > 0 {
+            self.state.remote_selected = self.state.remote_selected.min(count - 1);
         }
     }
 
@@ -976,27 +1052,42 @@ impl App {
             KeyCode::Char('q') => { self.hide_panel(); }
             KeyCode::Char('c') if ctrl => return Ok(true),
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.state.active_tab == Tab::Sessions {
-                    if self.state.tmux_expanded {
-                        self.state.navigate_tmux_window(1);
-                    } else {
-                        self.state.navigate_tmux_session(1);
+                match self.state.active_tab {
+                    Tab::Sessions => {
+                        if self.state.tmux_expanded {
+                            self.state.navigate_tmux_window(1);
+                        } else {
+                            self.state.navigate_tmux_session(1);
+                        }
                     }
-                } else {
-                    self.state.select_next();
-                    if self.state.show_detail { self.refresh_selected_transcript(); }
+                    Tab::Remote => {
+                        let count = self.state.remote_item_count();
+                        if count > 0 {
+                            self.state.remote_selected = (self.state.remote_selected + 1).min(count - 1);
+                        }
+                    }
+                    _ => {
+                        self.state.select_next();
+                        if self.state.show_detail { self.refresh_selected_transcript(); }
+                    }
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                if self.state.active_tab == Tab::Sessions {
-                    if self.state.tmux_expanded {
-                        self.state.navigate_tmux_window(-1);
-                    } else {
-                        self.state.navigate_tmux_session(-1);
+                match self.state.active_tab {
+                    Tab::Sessions => {
+                        if self.state.tmux_expanded {
+                            self.state.navigate_tmux_window(-1);
+                        } else {
+                            self.state.navigate_tmux_session(-1);
+                        }
                     }
-                } else {
-                    self.state.select_prev();
-                    if self.state.show_detail { self.refresh_selected_transcript(); }
+                    Tab::Remote => {
+                        self.state.remote_selected = self.state.remote_selected.saturating_sub(1);
+                    }
+                    _ => {
+                        self.state.select_prev();
+                        if self.state.show_detail { self.refresh_selected_transcript(); }
+                    }
                 }
             }
             KeyCode::Char('h') if self.state.active_tab == Tab::Agents => {
@@ -1024,6 +1115,11 @@ impl App {
             }
             KeyCode::Char('s' | 'S') => {
                 self.state.active_tab = Tab::Sessions;
+                self.state.tmux_window_cursor = None;
+                self.state.tmux_expanded = false;
+            }
+            KeyCode::Char('r' | 'R') => {
+                self.state.active_tab = Tab::Remote;
                 self.state.tmux_window_cursor = None;
                 self.state.tmux_expanded = false;
             }
@@ -1087,12 +1183,14 @@ impl App {
                 match self.state.active_tab {
                     Tab::Agents  => self.kill_and_remove_worktree(),
                     Tab::Sessions => self.kill_selected_tmux_session(),
+                    Tab::Remote  => {} // no-op for remote sessions (for now)
                 }
             }
             KeyCode::Char('X') if !self.state.has_waiting() => {
                 match self.state.active_tab {
                     Tab::Agents  => self.kill_selected_agent(),
                     Tab::Sessions => self.kill_selected_tmux_session(),
+                    Tab::Remote  => {} // no-op for remote sessions (for now)
                 }
             }
             KeyCode::Char(c @ '1'..='9') => {

@@ -304,6 +304,10 @@ pub struct AppState {
     /// Repo-root keys of groups that are collapsed in the Agents tab.
     /// When collapsed, only a summary header is shown instead of all cards.
     pub collapsed_groups: HashSet<String>,
+    /// Remote Tailnet hosts and their tmux sessions (for the Remote tab).
+    pub remote_hosts: Vec<RemoteHost>,
+    /// Selected index in the flattened Remote tab list.
+    pub remote_selected: usize,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
@@ -377,11 +381,27 @@ impl TmuxSession {
 
 // ── Tabs ────────────────────────────────────────────────────────────────────────
 
+// ── Remote hosts ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HostStatus {
+    Online,
+    Unreachable,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteHost {
+    pub hostname: String,
+    pub status: HostStatus,
+    pub sessions: Vec<TmuxSession>,
+}
+
 #[derive(Debug, Default, PartialEq, Clone)]
 pub enum Tab {
     #[default]
     Agents,
     Sessions,
+    Remote,
 }
 
 impl Default for AppState {
@@ -417,6 +437,8 @@ impl Default for AppState {
             new_agent_resolved_cwd: String::new(),
             new_agent_focus: NewAgentField::default(),
             collapsed_groups: HashSet::new(),
+            remote_hosts: vec![],
+            remote_selected: 0,
         }
     }
 }
@@ -968,8 +990,21 @@ impl AppState {
     pub fn toggle_tab(&mut self) {
         self.active_tab = match self.active_tab {
             Tab::Agents => Tab::Sessions,
-            Tab::Sessions => Tab::Agents,
+            Tab::Sessions => Tab::Remote,
+            Tab::Remote => Tab::Agents,
         };
+    }
+
+    /// Flat list of all remote sessions across hosts, for navigation.
+    pub fn remote_sessions_flat(&self) -> Vec<(&RemoteHost, &TmuxSession)> {
+        self.remote_hosts.iter()
+            .flat_map(|host| host.sessions.iter().map(move |s| (host, s)))
+            .collect()
+    }
+
+    /// Total number of items in the Remote tab (for clamping selection).
+    pub fn remote_item_count(&self) -> usize {
+        self.remote_hosts.iter().map(|h| h.sessions.len().max(1)).sum()
     }
 }
 
@@ -1311,6 +1346,8 @@ mod tests {
         assert_eq!(state.active_tab, Tab::Agents);
         state.toggle_tab();
         assert_eq!(state.active_tab, Tab::Sessions);
+        state.toggle_tab();
+        assert_eq!(state.active_tab, Tab::Remote);
         state.toggle_tab();
         assert_eq!(state.active_tab, Tab::Agents);
     }

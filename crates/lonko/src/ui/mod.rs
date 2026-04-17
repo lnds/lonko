@@ -4,6 +4,7 @@ mod header;
 mod help;
 pub(crate) mod list;
 mod new_agent;
+mod remote;
 pub(crate) mod tmux_sessions;
 
 use ratatui::Frame;
@@ -34,6 +35,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         }
         Tab::Sessions => {
             tmux_sessions::render(frame, chunks[1], state);
+        }
+        Tab::Remote => {
+            remote::render(frame, chunks[1], state);
         }
     }
     footer::render(frame, chunks[2], state);
