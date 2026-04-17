@@ -102,7 +102,7 @@ pub fn notify_if_needed(project_name: &str, status: &SessionStatus) {
             (format!("lonko · {} ⚠", project_name), msg.clone())
         }
         SessionStatus::WaitingForInput => {
-            (format!("lonko · {}", project_name), "listo, esperando tu input".into())
+            (format!("lonko · {}", project_name), "ready, waiting for your input".into())
         }
         _ => return,
     };

@@ -221,7 +221,7 @@ pub(crate) fn cards_fitting(sessions: &[&Session], start: usize, avail: u16, hea
         used += h;
         count += 1;
     }
-    count.max(1)
+    count
 }
 
 /// Compute scroll offset and visible count for a card list.
