@@ -1,3 +1,9 @@
+## v0.12.1 (2026-04-17)
+
+### Fix
+
+- **tmux**: guard kill against own window, not own session
+
 ## v0.12.0 (2026-04-17)
 
 ### Feat
