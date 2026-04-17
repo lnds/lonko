@@ -254,24 +254,8 @@ impl App {
         if total == 0 { return; }
 
         let list_h = h.saturating_sub(3 + 1);
-        let mut header_flags = ui::list::compute_header_flags(&visible);
-        for (i, s) in visible.iter().enumerate() {
-            if let Some(repo) = s.repo_root.as_deref() {
-                if self.state.is_group_collapsed(repo) && self.state.group_agent_count(repo) >= 2 {
-                    header_flags[i] = true;
-                }
-            }
-        }
-        let collapsed_flags: Vec<bool> = visible
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                header_flags[i]
-                    && s.repo_root
-                        .as_deref()
-                        .is_some_and(|r| self.state.is_group_collapsed(r))
-            })
-            .collect();
+        let (header_flags, collapsed_flags) =
+            ui::list::compute_header_and_collapsed(&visible, &self.state);
         let (scroll, cards_visible) = ui::list::compute_scroll(
             &visible, self.state.selected, list_h, &header_flags, &collapsed_flags, &self.state.bookmarks,
         );

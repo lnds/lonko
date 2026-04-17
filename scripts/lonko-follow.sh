@@ -2,6 +2,16 @@
 # Lonko follow: when the active window changes, move lonko to the new window.
 # Uses kill-and-respawn + layout save/restore to avoid layout drift.
 
+# Serialise concurrent invocations (client-session-changed and
+# after-select-window can fire back-to-back). Uses mkdir as an
+# atomic lock; if another invocation holds it, bail out — no
+# stale-lock recovery to avoid TOCTOU races.
+LOCKDIR="$HOME/.cache/lonko-follow.lock"
+if ! mkdir "$LOCKDIR" 2>/dev/null; then
+    exit 0
+fi
+trap 'rm -rf "$LOCKDIR"' EXIT
+
 LAYOUT_DIR="$HOME/.cache/lonko-layouts"
 mkdir -p "$LAYOUT_DIR"
 
@@ -49,6 +59,11 @@ if [ -f "$OLD_LAYOUT_FILE" ]; then
     tmux select-layout -t "$LONKO_WIN" "$(cat "$OLD_LAYOUT_FILE")" 2>/dev/null || true
     rm -f "$OLD_LAYOUT_FILE"
 fi
+
+# Final guard: another hook invocation may have already placed lonko here.
+EXISTING=$(tmux list-panes -t "$CURRENT_WIN" -F "#{pane_current_command}" \
+    | grep -c '^lonko$')
+[ "$EXISTING" -gt 0 ] && exit 0
 
 # Create a new lonko in the current window (full-height column on the right, 25%)
 tmux split-window -h -f -l 25% -t "$CURRENT_WIN" -d "lonko"

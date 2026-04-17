@@ -166,6 +166,36 @@ pub(crate) fn compute_group_keys<'a>(visible: &[&'a Session]) -> Vec<Option<&'a 
         .collect()
 }
 
+/// Compute header_flags and collapsed_flags together, applying the fixup
+/// for collapsed groups whose visible count dropped to 1. Returns both
+/// vectors in a single pass so callers don't duplicate the logic.
+pub(crate) fn compute_header_and_collapsed(
+    visible: &[&Session],
+    state: &AppState,
+) -> (Vec<bool>, Vec<bool>) {
+    let mut header_flags = compute_header_flags(visible);
+    // Force header for collapsed groups: after filtering, only 1 session
+    // remains visible so compute_header_flags won't mark it as multi-agent.
+    for (i, s) in visible.iter().enumerate() {
+        if let Some(repo) = s.repo_root.as_deref() {
+            if state.is_group_collapsed(repo) && state.group_agent_count(repo) >= 2 {
+                header_flags[i] = true;
+            }
+        }
+    }
+    let collapsed_flags: Vec<bool> = visible
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            header_flags[i]
+                && s.repo_root
+                    .as_deref()
+                    .is_some_and(|r| state.is_group_collapsed(r))
+        })
+        .collect();
+    (header_flags, collapsed_flags)
+}
+
 /// Total height for the card at `visible[idx]`, including the group header
 /// when `header_flags[idx]` is set. When `collapsed_flags[idx]` is true
 /// the card is a collapsed-group placeholder: only the header is shown.
@@ -180,6 +210,9 @@ fn slot_height(visible: &[&Session], idx: usize, header_flags: &[bool], collapse
 /// Compute how many cards fit from `start` in `sessions` given `avail` lines,
 /// accounting for any group headers rendered inline.
 pub(crate) fn cards_fitting(sessions: &[&Session], start: usize, avail: u16, header_flags: &[bool], collapsed_flags: &[bool], bookmarks: &HashMap<String, String>) -> usize {
+    if avail == 0 {
+        return 0;
+    }
     let mut used = 0u16;
     let mut count = 0;
     for i in start..sessions.len() {
@@ -264,32 +297,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 
     let total = visible.len();
-    let mut header_flags = compute_header_flags(&visible);
+    let (header_flags, collapsed_flags) = compute_header_and_collapsed(&visible, state);
     let group_keys = compute_group_keys(&visible);
-
-    // Force header_flags for collapsed groups: after filtering, only 1
-    // session remains visible so compute_header_flags won't mark it as
-    // a multi-agent group. Check the *full* session count instead.
-    for (i, s) in visible.iter().enumerate() {
-        if let Some(repo) = s.repo_root.as_deref() {
-            if state.is_group_collapsed(repo) && state.group_agent_count(repo) >= 2 {
-                header_flags[i] = true;
-            }
-        }
-    }
-
-    // A collapsed flag is true when the session is a placeholder for a
-    // collapsed group: it has a header but no card.
-    let collapsed_flags: Vec<bool> = visible
-        .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            header_flags[i]
-                && s.repo_root
-                    .as_deref()
-                    .is_some_and(|r| state.is_group_collapsed(r))
-        })
-        .collect();
 
     let (scroll, cards_visible) = compute_scroll(
         &visible, state.selected, list_area.height, &header_flags, &collapsed_flags, &state.bookmarks,
