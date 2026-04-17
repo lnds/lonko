@@ -1067,17 +1067,19 @@ impl App {
         Ok(false)
     }
 
-    /// Check whether `pane` belongs to the same tmux session as lonko.
-    /// Returns `true` when the pane should NOT be killed.
-    fn is_own_tmux_session(&self, pane: Option<&str>) -> bool {
+    /// Check whether `pane` belongs to the same tmux window as lonko.
+    /// Returns `true` when the pane should NOT be killed. Window-scoped
+    /// (not session-scoped) so a worktree agent running in a sibling
+    /// window of lonko's own tmux session can still be torn down.
+    fn is_own_tmux_window(&self, pane: Option<&str>) -> bool {
         let Some(own) = &self.state.own_pane else { return false };
         let Some(p) = pane else { return false };
         // Fast path: same pane ID.
         if own == p { return true; }
-        // Slow path: resolve both to their tmux session name.
-        let own_sess = tmux_session_for_pane(own);
-        let tgt_sess = tmux_session_for_pane(p);
-        matches!((own_sess, tgt_sess), (Some(a), Some(b)) if a == b)
+        // Slow path: resolve both to their tmux window ID (globally unique).
+        let own_win = tmux::tmux_window_for_pane(own);
+        let tgt_win = tmux::tmux_window_for_pane(p);
+        matches!((own_win, tgt_win), (Some(a), Some(b)) if a == b)
     }
 
     /// Soft kill: send Ctrl-C to the selected agent's tmux pane.
@@ -1089,7 +1091,7 @@ impl App {
         let pane = session.tmux_pane.clone()
             .or_else(|| tmux::find_pane_for_pid(pid));
         // Never send Ctrl-C to lonko's own pane.
-        if self.is_own_tmux_session(pane.as_deref()) {
+        if self.is_own_tmux_window(pane.as_deref()) {
             return;
         }
         if let Some(ref p) = pane {
@@ -1113,11 +1115,11 @@ impl App {
         let pane = session.tmux_pane.clone()
             .or_else(|| tmux::find_pane_for_pid(pid));
 
-        // Never kill the tmux session lonko is running in.
-        // Compare at the tmux-session level (not just pane ID) so the guard
-        // still works when session.tmux_pane is None and the pane was resolved
-        // via find_pane_for_pid.
-        if self.is_own_tmux_session(pane.as_deref()) {
+        // Never kill the tmux window lonko is running in.
+        // Compare at the window level (not session) because tmux kill-window
+        // only removes the single window, so a worktree agent in a sibling
+        // window of lonko's own session can still be safely torn down.
+        if self.is_own_tmux_window(pane.as_deref()) {
             return;
         }
 

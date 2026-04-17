@@ -282,6 +282,17 @@ pub fn tmux_session_for_pane(pane_id: &str) -> Option<String> {
     if name.is_empty() { None } else { Some(name) }
 }
 
+/// Return the tmux window ID (e.g. `@12`) that contains a given pane.
+/// Window IDs are globally unique across all tmux sessions.
+pub fn tmux_window_for_pane(pane_id: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-t", pane_id, "-p", "#{window_id}"])
+        .output()
+        .ok()?;
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if id.is_empty() { None } else { Some(id) }
+}
+
 /// Return a map of pane_id → pane_current_path for all tmux panes.
 fn pane_path_map() -> std::collections::HashMap<String, String> {
     let Ok(output) = Command::new("tmux")
