@@ -304,6 +304,16 @@ pub struct AppState {
     /// Repo-root keys of groups that are collapsed in the Agents tab.
     /// When collapsed, only a summary header is shown instead of all cards.
     pub collapsed_groups: HashSet<String>,
+    /// Remote Tailnet hosts and their tmux sessions (for the Remote tab).
+    pub remote_hosts: Vec<RemoteHost>,
+    /// Selected index in the flattened Remote tab list.
+    pub remote_selected: usize,
+    /// Hostnames excluded from remote polling (persisted to config).
+    pub excluded_hosts: HashSet<String>,
+    /// Whether the Remote tab is enabled (from config).
+    pub remote_enabled: bool,
+    /// Remote poll interval in ticks (poll_interval_secs * 10).
+    pub remote_poll_ticks: u64,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
@@ -377,11 +387,31 @@ impl TmuxSession {
 
 // ── Tabs ────────────────────────────────────────────────────────────────────────
 
+// ── Remote hosts ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostStatus {
+    Online,
+    Unreachable,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteHost {
+    pub hostname: String,
+    pub status: HostStatus,
+    pub sessions: Vec<TmuxSession>,
+    /// Consecutive poll failures (reset on success).
+    pub fail_count: u32,
+    /// Tick number at which this host becomes eligible for polling again.
+    pub next_poll_tick: u64,
+}
+
 #[derive(Debug, Default, PartialEq, Clone)]
 pub enum Tab {
     #[default]
     Agents,
     Sessions,
+    Remote,
 }
 
 impl Default for AppState {
@@ -417,6 +447,11 @@ impl Default for AppState {
             new_agent_resolved_cwd: String::new(),
             new_agent_focus: NewAgentField::default(),
             collapsed_groups: HashSet::new(),
+            remote_hosts: vec![],
+            remote_selected: 0,
+            excluded_hosts: HashSet::new(),
+            remote_enabled: false,
+            remote_poll_ticks: 100, // 10s default
         }
     }
 }
@@ -968,8 +1003,61 @@ impl AppState {
     pub fn toggle_tab(&mut self) {
         self.active_tab = match self.active_tab {
             Tab::Agents => Tab::Sessions,
-            Tab::Sessions => Tab::Agents,
+            Tab::Sessions => {
+                if self.remote_enabled { Tab::Remote } else { Tab::Agents }
+            }
+            Tab::Remote => Tab::Agents,
         };
+    }
+
+    /// Flat list of all remote sessions across hosts, for navigation.
+    pub fn remote_sessions_flat(&self) -> Vec<(&RemoteHost, &TmuxSession)> {
+        self.remote_hosts.iter()
+            .flat_map(|host| host.sessions.iter().map(move |s| (host, s)))
+            .collect()
+    }
+
+    /// Total number of items in the Remote tab (for clamping selection).
+    pub fn remote_item_count(&self) -> usize {
+        self.remote_hosts.iter().map(|h| h.sessions.len()).sum()
+    }
+
+    /// Navigate the remote session list by `delta` (+1 down, -1 up).
+    pub fn navigate_remote(&mut self, delta: isize) {
+        let count = self.remote_item_count();
+        if count == 0 { return; }
+        if delta > 0 {
+            self.remote_selected = (self.remote_selected + 1).min(count - 1);
+        } else {
+            self.remote_selected = self.remote_selected.saturating_sub(1);
+        }
+    }
+
+    /// Return the hostname of the currently selected remote item.
+    pub fn selected_remote_host(&self) -> Option<&str> {
+        let mut idx = 0;
+        for host in &self.remote_hosts {
+            let count = host.sessions.len();
+            if count > 0 && self.remote_selected < idx + count {
+                return Some(&host.hostname);
+            }
+            idx += count;
+        }
+        None
+    }
+
+    /// Return the (hostname, session_name) for the currently selected remote item.
+    pub fn selected_remote_session(&self) -> Option<(&str, &str)> {
+        let mut idx = 0;
+        for host in &self.remote_hosts {
+            for session in &host.sessions {
+                if idx == self.remote_selected {
+                    return Some((&host.hostname, &session.name));
+                }
+                idx += 1;
+            }
+        }
+        None
     }
 }
 
@@ -1306,11 +1394,25 @@ mod tests {
     }
 
     #[test]
-    fn toggle_tab_cycles() {
+    fn toggle_tab_cycles_without_remote() {
         let mut state = AppState::default();
+        assert!(!state.remote_enabled);
         assert_eq!(state.active_tab, Tab::Agents);
         state.toggle_tab();
         assert_eq!(state.active_tab, Tab::Sessions);
+        state.toggle_tab();
+        assert_eq!(state.active_tab, Tab::Agents); // skips Remote
+    }
+
+    #[test]
+    fn toggle_tab_cycles_with_remote() {
+        let mut state = AppState::default();
+        state.remote_enabled = true;
+        assert_eq!(state.active_tab, Tab::Agents);
+        state.toggle_tab();
+        assert_eq!(state.active_tab, Tab::Sessions);
+        state.toggle_tab();
+        assert_eq!(state.active_tab, Tab::Remote);
         state.toggle_tab();
         assert_eq!(state.active_tab, Tab::Agents);
     }

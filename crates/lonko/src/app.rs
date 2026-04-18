@@ -129,6 +129,10 @@ impl App {
     pub fn new() -> Self {
         let mut state = AppState::default();
         state.bookmarks = crate::state::load_bookmarks();
+        let config = crate::config::load();
+        state.remote_enabled = config.remote.enabled;
+        state.remote_poll_ticks = config.remote.poll_interval_secs.max(1) * 10;
+        state.excluded_hosts = crate::config::load_excluded_hosts();
         Self {
             state,
             scan_tx: None,
@@ -449,6 +453,7 @@ impl App {
             Tab::Sessions => {
                 self.state.navigate_tmux_session(delta);
             }
+            Tab::Remote => self.state.navigate_remote(delta),
         }
     }
 
@@ -464,6 +469,44 @@ impl App {
         }
         let _ = std::process::Command::new("tmux")
             .args(["switch-client", "-t", &name])
+            .status();
+    }
+
+    /// Toggle exclusion of the host under the cursor in the Remote tab.
+    /// Excluded hosts are removed from the list and skipped during polling.
+    fn toggle_exclude_remote_host(&mut self) {
+        let Some(hostname) = self.state.selected_remote_host().map(|s| s.to_string()) else {
+            return;
+        };
+        if self.state.excluded_hosts.contains(&hostname) {
+            self.state.excluded_hosts.remove(&hostname);
+        } else {
+            self.state.excluded_hosts.insert(hostname.clone());
+            // Remove from visible list immediately.
+            self.state.remote_hosts.retain(|h| h.hostname != hostname);
+            // Clamp selection.
+            let count = self.state.remote_item_count();
+            if count > 0 {
+                self.state.remote_selected = self.state.remote_selected.min(count - 1);
+            } else {
+                self.state.remote_selected = 0;
+            }
+        }
+        crate::config::save_excluded_hosts(&self.state.excluded_hosts);
+    }
+
+    /// Open a new tmux window that SSH-attaches to the selected remote session.
+    /// The local side passes arguments directly (no shell). The remote command
+    /// single-quote-escapes the session name to prevent injection on the remote
+    /// shell (`'` → `'\''`).
+    fn attach_remote_session(&self) {
+        let Some((host, session_name)) = self.state.selected_remote_session() else { return };
+        let win_name = format!("{}:{}", host, session_name);
+        let escaped = session_name.replace('\'', "'\\''");
+        let attach_cmd = format!("tmux attach-session -t '{}'", escaped);
+        let _ = std::process::Command::new("tmux")
+            .args(["new-window", "-n", &win_name, "--",
+                   "ssh", host, "-t", &attach_cmd])
             .status();
     }
 
@@ -764,6 +807,19 @@ impl App {
                 self.state.term_height = h;
             }
             Event::PermissionResponse(key) => self.send_permission(&key),
+            Event::RemoteSnapshot(snapshot) => {
+                self.on_remote_snapshot(snapshot);
+            }
+            Event::RemotePeersOnline(online) => {
+                // Remove hosts that are no longer in the Tailnet peer list.
+                self.state.remote_hosts.retain(|h| online.contains(&h.hostname));
+                let count = self.state.remote_item_count();
+                if count > 0 {
+                    self.state.remote_selected = self.state.remote_selected.min(count - 1);
+                } else {
+                    self.state.remote_selected = 0;
+                }
+            }
         }
         Ok(false)
     }
@@ -823,6 +879,117 @@ impl App {
                 .filter_map(|s| s.tmux_pane.clone())
                 .collect();
             tmux_scanner::scan(tx, &known_panes, self.state.own_pane.as_deref());
+        }
+
+        // Poll remote Tailnet hosts, only while the Remote tab is active.
+        // Each host has its own next_poll_tick based on backoff; we check every tick.
+        if self.state.active_tab == Tab::Remote
+            && self.state.tick.is_multiple_of(10) // check eligibility every 1s
+            && let Some(ref tx) = self.scan_tx
+        {
+            let tick = self.state.tick;
+            let excluded = self.state.excluded_hosts.clone();
+
+            // Collect hosts that are due for polling.
+            let known_hosts: std::collections::HashMap<String, u64> = self.state.remote_hosts
+                .iter()
+                .map(|h| (h.hostname.clone(), h.next_poll_tick))
+                .collect();
+
+            let tx = tx.clone();
+            // Discover peers (fast, local command) then spawn one blocking
+            // task per eligible host so a slow/unreachable host doesn't
+            // block the others.
+            tokio::spawn(async move {
+                let peers = match tokio::task::spawn_blocking(
+                    crate::sources::tailnet::list_online_peers
+                ).await {
+                    Ok(Ok(p)) => p,
+                    Ok(Err(e)) => { tracing::warn!("tailnet discovery failed: {e}"); return; }
+                    Err(e) => { tracing::warn!("tailnet task panicked: {e}"); return; }
+                };
+
+                let online_names: Vec<String> = peers.iter()
+                    .filter(|p| !excluded.contains(&p.hostname))
+                    .map(|p| p.hostname.clone())
+                    .collect();
+
+                for peer in peers {
+                    if excluded.contains(&peer.hostname) { continue; }
+                    if let Some(&next_tick) = known_hosts.get(&peer.hostname) {
+                        if tick < next_tick { continue; }
+                    }
+                    let tx = tx.clone();
+                    let host = peer.hostname.clone();
+                    tokio::task::spawn_blocking(move || {
+                        match crate::sources::remote_tmux::poll_host(&host) {
+                            Ok(snapshot) => {
+                                let _ = tx.send(Event::RemoteSnapshot(snapshot));
+                            }
+                            Err(e) => {
+                                tracing::debug!("remote poll {host} failed: {e}");
+                                let _ = tx.send(Event::RemoteSnapshot(
+                                    crate::sources::remote_tmux::RemoteSnapshot {
+                                        host: host.clone(),
+                                        sessions: vec![],
+                                        is_error: true,
+                                    },
+                                ));
+                            }
+                        }
+                    });
+                }
+
+                let _ = tx.send(Event::RemotePeersOnline(online_names));
+            });
+        }
+    }
+
+    /// Compute the next poll tick for a host based on its failure count.
+    /// Doubles the base interval per failure, capped at 5 minutes.
+    fn backoff_ticks(base_ticks: u64, fail_count: u32, current_tick: u64) -> u64 {
+        let shift = fail_count.min(32);
+        let delay = base_ticks.saturating_mul(1u64.checked_shl(shift).unwrap_or(u64::MAX)).min(3000);
+        current_tick + delay
+    }
+
+    fn on_remote_snapshot(&mut self, snapshot: crate::sources::remote_tmux::RemoteSnapshot) {
+        let is_error = snapshot.is_error;
+        let tick = self.state.tick;
+        let base = self.state.remote_poll_ticks;
+        if let Some(host) = self.state.remote_hosts.iter_mut().find(|h| h.hostname == snapshot.host) {
+            if is_error {
+                host.status = crate::state::HostStatus::Unreachable;
+                host.fail_count += 1;
+                host.next_poll_tick = Self::backoff_ticks(base, host.fail_count, tick);
+            } else {
+                host.status = crate::state::HostStatus::Online;
+                host.sessions = snapshot.sessions;
+                host.fail_count = 0;
+                host.next_poll_tick = tick + base;
+            }
+        } else {
+            let (status, fail_count, next_poll_tick) = if is_error {
+                (crate::state::HostStatus::Unreachable, 1, Self::backoff_ticks(base, 1, tick))
+            } else {
+                (crate::state::HostStatus::Online, 0, tick + base)
+            };
+            self.state.remote_hosts.push(crate::state::RemoteHost {
+                hostname: snapshot.host,
+                status,
+                sessions: snapshot.sessions,
+                fail_count,
+                next_poll_tick,
+            });
+            // Keep hosts sorted alphabetically.
+            self.state.remote_hosts.sort_by(|a, b| {
+                a.hostname.to_ascii_lowercase().cmp(&b.hostname.to_ascii_lowercase())
+            });
+        }
+        // Clamp selection.
+        let count = self.state.remote_item_count();
+        if count > 0 {
+            self.state.remote_selected = self.state.remote_selected.min(count - 1);
         }
     }
 
@@ -976,27 +1143,35 @@ impl App {
             KeyCode::Char('q') => { self.hide_panel(); }
             KeyCode::Char('c') if ctrl => return Ok(true),
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.state.active_tab == Tab::Sessions {
-                    if self.state.tmux_expanded {
-                        self.state.navigate_tmux_window(1);
-                    } else {
-                        self.state.navigate_tmux_session(1);
+                match self.state.active_tab {
+                    Tab::Sessions => {
+                        if self.state.tmux_expanded {
+                            self.state.navigate_tmux_window(1);
+                        } else {
+                            self.state.navigate_tmux_session(1);
+                        }
                     }
-                } else {
-                    self.state.select_next();
-                    if self.state.show_detail { self.refresh_selected_transcript(); }
+                    Tab::Remote => self.state.navigate_remote(1),
+                    _ => {
+                        self.state.select_next();
+                        if self.state.show_detail { self.refresh_selected_transcript(); }
+                    }
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                if self.state.active_tab == Tab::Sessions {
-                    if self.state.tmux_expanded {
-                        self.state.navigate_tmux_window(-1);
-                    } else {
-                        self.state.navigate_tmux_session(-1);
+                match self.state.active_tab {
+                    Tab::Sessions => {
+                        if self.state.tmux_expanded {
+                            self.state.navigate_tmux_window(-1);
+                        } else {
+                            self.state.navigate_tmux_session(-1);
+                        }
                     }
-                } else {
-                    self.state.select_prev();
-                    if self.state.show_detail { self.refresh_selected_transcript(); }
+                    Tab::Remote => self.state.navigate_remote(-1),
+                    _ => {
+                        self.state.select_prev();
+                        if self.state.show_detail { self.refresh_selected_transcript(); }
+                    }
                 }
             }
             KeyCode::Char('h') if self.state.active_tab == Tab::Agents => {
@@ -1024,6 +1199,11 @@ impl App {
             }
             KeyCode::Char('s' | 'S') => {
                 self.state.active_tab = Tab::Sessions;
+                self.state.tmux_window_cursor = None;
+                self.state.tmux_expanded = false;
+            }
+            KeyCode::Char('r' | 'R') if self.state.remote_enabled => {
+                self.state.active_tab = Tab::Remote;
                 self.state.tmux_window_cursor = None;
                 self.state.tmux_expanded = false;
             }
@@ -1056,6 +1236,8 @@ impl App {
                 if self.state.active_tab == Tab::Sessions {
                     self.focus_tmux_session();
                     self.state.tmux_expanded = false;
+                } else if self.state.active_tab == Tab::Remote {
+                    self.attach_remote_session();
                 } else {
                     self.focus_selected();
                 }
@@ -1087,12 +1269,20 @@ impl App {
                 match self.state.active_tab {
                     Tab::Agents  => self.kill_and_remove_worktree(),
                     Tab::Sessions => self.kill_selected_tmux_session(),
+                    Tab::Remote  => self.toggle_exclude_remote_host(),
                 }
             }
             KeyCode::Char('X') if !self.state.has_waiting() => {
                 match self.state.active_tab {
                     Tab::Agents  => self.kill_selected_agent(),
                     Tab::Sessions => self.kill_selected_tmux_session(),
+                    Tab::Remote  => {
+                        // Restore all excluded hosts.
+                        if !self.state.excluded_hosts.is_empty() {
+                            self.state.excluded_hosts.clear();
+                            crate::config::save_excluded_hosts(&self.state.excluded_hosts);
+                        }
+                    }
                 }
             }
             KeyCode::Char(c @ '1'..='9') => {

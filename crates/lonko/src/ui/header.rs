@@ -43,7 +43,14 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     } else {
         Color::Rgb(169, 177, 214)
     };
-    let tab_titles = vec![
+    let remote_color = if !state.focused {
+        Color::Rgb(59, 66, 97)
+    } else if state.active_tab == Tab::Remote {
+        Color::Rgb(187, 154, 247) // purple accent for remote
+    } else {
+        Color::Rgb(169, 177, 214)
+    };
+    let mut tab_titles = vec![
         Line::from(vec![
             Span::styled("A", Style::default().fg(agents_color).add_modifier(Modifier::UNDERLINED)),
             Span::styled("gents", Style::default().fg(agents_color)),
@@ -53,10 +60,17 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             Span::styled("essions", Style::default().fg(sessions_color)),
         ]),
     ];
+    if state.remote_enabled {
+        tab_titles.push(Line::from(vec![
+            Span::styled("R", Style::default().fg(remote_color).add_modifier(Modifier::UNDERLINED)),
+            Span::styled("emote", Style::default().fg(remote_color)),
+        ]));
+    }
 
     let selected_tab = match state.active_tab {
         Tab::Agents => 0,
         Tab::Sessions => 1,
+        Tab::Remote => 2,
     };
 
     // Build title as a Line with per-counter colored spans
