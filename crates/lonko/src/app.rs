@@ -948,7 +948,8 @@ impl App {
     /// Compute the next poll tick for a host based on its failure count.
     /// Doubles the base interval per failure, capped at 5 minutes.
     fn backoff_ticks(base_ticks: u64, fail_count: u32, current_tick: u64) -> u64 {
-        let delay = base_ticks.saturating_mul(1u64 << fail_count).min(3000);
+        let shift = fail_count.min(32);
+        let delay = base_ticks.saturating_mul(1u64.checked_shl(shift).unwrap_or(u64::MAX)).min(3000);
         current_tick + delay
     }
 
