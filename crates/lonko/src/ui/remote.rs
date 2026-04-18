@@ -40,8 +40,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             session_count: host.sessions.len(),
         });
         if host.sessions.is_empty() {
-            items.push(RenderItem::EmptyHost { hostname: &host.hostname, flat_idx });
-            flat_idx += 1;
+            items.push(RenderItem::EmptyHost { hostname: &host.hostname });
         } else {
             for session in &host.sessions {
                 items.push(RenderItem::Session {
@@ -67,8 +66,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
 
     // Simple scroll: find the selected item and center it.
     let selected_render_idx = items.iter().position(|item| match item {
-        RenderItem::Session { flat_idx, .. } | RenderItem::EmptyHost { flat_idx, .. }
-            => *flat_idx == state.remote_selected,
+        RenderItem::Session { flat_idx, .. } => *flat_idx == state.remote_selected,
         _ => false,
     });
 
@@ -83,8 +81,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         }
         let rect = Rect::new(area.x, y, area.width, h);
         let is_selected = match item {
-            RenderItem::Session { flat_idx, .. } | RenderItem::EmptyHost { flat_idx, .. }
-                => *flat_idx == state.remote_selected,
+            RenderItem::Session { flat_idx, .. } => *flat_idx == state.remote_selected,
             _ => false,
         };
         render_item(frame, rect, item, is_selected);
@@ -104,7 +101,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
 
 enum RenderItem<'a> {
     HostHeader { hostname: &'a str, status: &'a HostStatus, session_count: usize },
-    EmptyHost { hostname: &'a str, flat_idx: usize },
+    EmptyHost { hostname: &'a str },
     Session { hostname: &'a str, name: &'a str, attached: bool, has_claude: bool, window_count: usize, age_label: String, flat_idx: usize },
 }
 
@@ -158,7 +155,7 @@ fn render_item(frame: &mut Frame, area: Rect, item: &RenderItem, selected: bool)
             frame.render_widget(p, area);
         }
         RenderItem::EmptyHost { hostname, .. } => {
-            let bg = if selected { NAV_BG } else { Color::Reset };
+            let bg = Color::Reset;
             let line = Line::from(vec![
                 Span::raw("    "),
                 Span::styled("no tmux sessions", Style::default().fg(DIM)),
@@ -189,7 +186,7 @@ fn render_item(frame: &mut Frame, area: Rect, item: &RenderItem, selected: bool)
                     format!(
                         "{:>width$}",
                         badge,
-                        width = area.width.saturating_sub(3 + name.len() as u16 + 2) as usize
+                        width = area.width.saturating_sub(3 + u16::try_from(name.len()).unwrap_or(u16::MAX) + 2) as usize
                     ),
                     Style::default().fg(DIM),
                 ),

@@ -132,7 +132,7 @@ impl App {
         let config = crate::config::load();
         state.remote_enabled = config.remote.enabled;
         state.remote_poll_ticks = config.remote.poll_interval_secs.max(1) * 10;
-        state.excluded_hosts = config.remote.excluded_hosts;
+        state.excluded_hosts = crate::config::load_excluded_hosts();
         Self {
             state,
             scan_tx: None,
@@ -453,16 +453,7 @@ impl App {
             Tab::Sessions => {
                 self.state.navigate_tmux_session(delta);
             }
-            Tab::Remote => {
-                let count = self.state.remote_item_count();
-                if count > 0 {
-                    if delta > 0 {
-                        self.state.remote_selected = (self.state.remote_selected + 1).min(count - 1);
-                    } else {
-                        self.state.remote_selected = self.state.remote_selected.saturating_sub(1);
-                    }
-                }
-            }
+            Tab::Remote => self.state.navigate_remote(delta),
         }
     }
 
@@ -505,12 +496,14 @@ impl App {
     }
 
     /// Open a new tmux window that SSH-attaches to the selected remote session.
-    /// Arguments are passed directly to avoid shell injection via crafted
-    /// hostnames or session names.
+    /// The local side passes arguments directly (no shell). The remote command
+    /// single-quote-escapes the session name to prevent injection on the remote
+    /// shell (`'` → `'\''`).
     fn attach_remote_session(&self) {
         let Some((host, session_name)) = self.state.selected_remote_session() else { return };
         let win_name = format!("{}:{}", host, session_name);
-        let attach_cmd = format!("tmux attach-session -t {}", session_name);
+        let escaped = session_name.replace('\'', "'\\''");
+        let attach_cmd = format!("tmux attach-session -t '{}'", escaped);
         let _ = std::process::Command::new("tmux")
             .args(["new-window", "-n", &win_name, "--",
                    "ssh", host, "-t", &attach_cmd])
@@ -904,83 +897,81 @@ impl App {
                 .collect();
 
             let tx = tx.clone();
-            tokio::task::spawn_blocking(move || {
-                let peers = match crate::sources::tailnet::list_online_peers() {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::warn!("tailnet discovery failed: {e}");
-                        return;
-                    }
+            // Discover peers (fast, local command) then spawn one blocking
+            // task per eligible host so a slow/unreachable host doesn't
+            // block the others.
+            tokio::spawn(async move {
+                let peers = match tokio::task::spawn_blocking(
+                    crate::sources::tailnet::list_online_peers
+                ).await {
+                    Ok(Ok(p)) => p,
+                    Ok(Err(e)) => { tracing::warn!("tailnet discovery failed: {e}"); return; }
+                    Err(e) => { tracing::warn!("tailnet task panicked: {e}"); return; }
                 };
+
                 let online_names: Vec<String> = peers.iter()
                     .filter(|p| !excluded.contains(&p.hostname))
                     .map(|p| p.hostname.clone())
                     .collect();
 
                 for peer in peers {
-                    if excluded.contains(&peer.hostname) {
-                        continue;
-                    }
-                    // Respect per-host backoff. New hosts are always polled.
+                    if excluded.contains(&peer.hostname) { continue; }
                     if let Some(&next_tick) = known_hosts.get(&peer.hostname) {
-                        if tick < next_tick {
-                            continue;
-                        }
+                        if tick < next_tick { continue; }
                     }
                     let tx = tx.clone();
                     let host = peer.hostname.clone();
-                    match crate::sources::remote_tmux::poll_host(&host) {
-                        Ok(snapshot) => {
-                            let _ = tx.send(Event::RemoteSnapshot(snapshot));
+                    tokio::task::spawn_blocking(move || {
+                        match crate::sources::remote_tmux::poll_host(&host) {
+                            Ok(snapshot) => {
+                                let _ = tx.send(Event::RemoteSnapshot(snapshot));
+                            }
+                            Err(e) => {
+                                tracing::debug!("remote poll {host} failed: {e}");
+                                let _ = tx.send(Event::RemoteSnapshot(
+                                    crate::sources::remote_tmux::RemoteSnapshot {
+                                        host: host.clone(),
+                                        sessions: vec![],
+                                        is_error: true,
+                                    },
+                                ));
+                            }
                         }
-                        Err(e) => {
-                            tracing::debug!("remote poll {host} failed: {e}");
-                            let _ = tx.send(Event::RemoteSnapshot(
-                                crate::sources::remote_tmux::RemoteSnapshot {
-                                    host: host.clone(),
-                                    sessions: vec![],
-                                    is_error: true,
-                                },
-                            ));
-                        }
-                    }
+                    });
                 }
 
-                // Notify the event loop which peers are online so stale hosts
-                // can be pruned.
                 let _ = tx.send(Event::RemotePeersOnline(online_names));
             });
         }
     }
 
     /// Compute the next poll tick for a host based on its failure count.
-    /// Backoff: 10s, 20s, 40s, 80s, 160s, capped at 300s (5 min).
-    fn backoff_ticks(fail_count: u32, current_tick: u64) -> u64 {
-        let base_ticks: u64 = 100; // 10s
-        let delay = base_ticks.saturating_mul(1u64 << fail_count.min(5));
-        let capped = delay.min(3000); // 300s max
-        current_tick + capped
+    /// Doubles the base interval per failure, capped at 5 minutes.
+    fn backoff_ticks(base_ticks: u64, fail_count: u32, current_tick: u64) -> u64 {
+        let delay = base_ticks.saturating_mul(1u64 << fail_count).min(3000);
+        current_tick + delay
     }
 
     fn on_remote_snapshot(&mut self, snapshot: crate::sources::remote_tmux::RemoteSnapshot) {
         let is_error = snapshot.is_error;
         let tick = self.state.tick;
+        let base = self.state.remote_poll_ticks;
         if let Some(host) = self.state.remote_hosts.iter_mut().find(|h| h.hostname == snapshot.host) {
             if is_error {
                 host.status = crate::state::HostStatus::Unreachable;
                 host.fail_count += 1;
-                host.next_poll_tick = Self::backoff_ticks(host.fail_count, tick);
+                host.next_poll_tick = Self::backoff_ticks(base, host.fail_count, tick);
             } else {
                 host.status = crate::state::HostStatus::Online;
                 host.sessions = snapshot.sessions;
                 host.fail_count = 0;
-                host.next_poll_tick = tick + 100; // normal 10s interval
+                host.next_poll_tick = tick + base;
             }
         } else {
             let (status, fail_count, next_poll_tick) = if is_error {
-                (crate::state::HostStatus::Unreachable, 1, Self::backoff_ticks(1, tick))
+                (crate::state::HostStatus::Unreachable, 1, Self::backoff_ticks(base, 1, tick))
             } else {
-                (crate::state::HostStatus::Online, 0, tick + 100)
+                (crate::state::HostStatus::Online, 0, tick + base)
             };
             self.state.remote_hosts.push(crate::state::RemoteHost {
                 hostname: snapshot.host,
@@ -1159,12 +1150,7 @@ impl App {
                             self.state.navigate_tmux_session(1);
                         }
                     }
-                    Tab::Remote => {
-                        let count = self.state.remote_item_count();
-                        if count > 0 {
-                            self.state.remote_selected = (self.state.remote_selected + 1).min(count - 1);
-                        }
-                    }
+                    Tab::Remote => self.state.navigate_remote(1),
                     _ => {
                         self.state.select_next();
                         if self.state.show_detail { self.refresh_selected_transcript(); }
@@ -1180,9 +1166,7 @@ impl App {
                             self.state.navigate_tmux_session(-1);
                         }
                     }
-                    Tab::Remote => {
-                        self.state.remote_selected = self.state.remote_selected.saturating_sub(1);
-                    }
+                    Tab::Remote => self.state.navigate_remote(-1),
                     _ => {
                         self.state.select_prev();
                         if self.state.show_detail { self.refresh_selected_transcript(); }

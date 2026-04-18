@@ -32,7 +32,6 @@ pub struct Config {
 pub struct RemoteConfig {
     pub enabled: bool,
     pub poll_interval_secs: u64,
-    pub excluded_hosts: HashSet<String>,
 }
 
 impl Default for Config {
@@ -48,7 +47,6 @@ impl Default for RemoteConfig {
         Self {
             enabled: false,
             poll_interval_secs: 10,
-            excluded_hosts: HashSet::new(),
         }
     }
 }
@@ -62,20 +60,27 @@ pub fn load() -> Config {
     }
 }
 
-/// Save config to disk. Creates the config directory if needed.
-pub fn save(config: &Config) {
-    let dir = config_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    if let Ok(toml_str) = toml::to_string_pretty(config) {
-        let _ = std::fs::write(config_path(), toml_str);
-    }
+// ── Excluded hosts (separate file, not in config.toml) ───────────────────────
+// Kept in its own JSON file so lonko never writes to config.toml
+// (preserving user comments, ordering, and unknown keys).
+
+fn excluded_hosts_path() -> PathBuf {
+    config_dir().join("excluded-hosts.json")
 }
 
-/// Save only the excluded_hosts to the existing config (merge, don't overwrite).
+pub fn load_excluded_hosts() -> HashSet<String> {
+    std::fs::read_to_string(excluded_hosts_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
 pub fn save_excluded_hosts(excluded: &HashSet<String>) {
-    let mut config = load();
-    config.remote.excluded_hosts = excluded.clone();
-    save(&config);
+    let dir = config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(json) = serde_json::to_string_pretty(excluded) {
+        let _ = std::fs::write(excluded_hosts_path(), json);
+    }
 }
 
 #[cfg(test)]
@@ -87,7 +92,6 @@ mod tests {
         let config = Config::default();
         assert!(!config.remote.enabled);
         assert_eq!(config.remote.poll_interval_secs, 10);
-        assert!(config.remote.excluded_hosts.is_empty());
     }
 
     #[test]
@@ -107,13 +111,10 @@ mod tests {
             [remote]
             enabled = true
             poll_interval_secs = 30
-            excluded_hosts = ["printer", "phone"]
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.remote.enabled);
         assert_eq!(config.remote.poll_interval_secs, 30);
-        assert!(config.remote.excluded_hosts.contains("printer"));
-        assert!(config.remote.excluded_hosts.contains("phone"));
     }
 
     #[test]

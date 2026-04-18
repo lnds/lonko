@@ -1019,15 +1019,26 @@ impl AppState {
 
     /// Total number of items in the Remote tab (for clamping selection).
     pub fn remote_item_count(&self) -> usize {
-        self.remote_hosts.iter().map(|h| h.sessions.len().max(1)).sum()
+        self.remote_hosts.iter().map(|h| h.sessions.len()).sum()
+    }
+
+    /// Navigate the remote session list by `delta` (+1 down, -1 up).
+    pub fn navigate_remote(&mut self, delta: isize) {
+        let count = self.remote_item_count();
+        if count == 0 { return; }
+        if delta > 0 {
+            self.remote_selected = (self.remote_selected + 1).min(count - 1);
+        } else {
+            self.remote_selected = self.remote_selected.saturating_sub(1);
+        }
     }
 
     /// Return the hostname of the currently selected remote item.
     pub fn selected_remote_host(&self) -> Option<&str> {
         let mut idx = 0;
         for host in &self.remote_hosts {
-            let count = host.sessions.len().max(1);
-            if self.remote_selected < idx + count {
+            let count = host.sessions.len();
+            if count > 0 && self.remote_selected < idx + count {
                 return Some(&host.hostname);
             }
             idx += count;
@@ -1036,22 +1047,14 @@ impl AppState {
     }
 
     /// Return the (hostname, session_name) for the currently selected remote item.
-    /// Returns None if the selection points to an empty-host placeholder.
     pub fn selected_remote_session(&self) -> Option<(&str, &str)> {
         let mut idx = 0;
         for host in &self.remote_hosts {
-            if host.sessions.is_empty() {
+            for session in &host.sessions {
                 if idx == self.remote_selected {
-                    return None; // empty host placeholder
+                    return Some((&host.hostname, &session.name));
                 }
                 idx += 1;
-            } else {
-                for session in &host.sessions {
-                    if idx == self.remote_selected {
-                        return Some((&host.hostname, &session.name));
-                    }
-                    idx += 1;
-                }
             }
         }
         None
