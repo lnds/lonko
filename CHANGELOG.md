@@ -1,3 +1,20 @@
+## v0.14.0 (2026-04-18)
+
+### Feat
+
+- **remote**: make Remote tab opt-in via config file
+- **remote**: exponential backoff for unreachable hosts and x to exclude
+- **remote**: Enter on remote session opens ssh+attach in new tmux window
+- **remote**: add Remote tab with Tailnet host discovery and SSH polling
+
+### Fix
+
+- remove .max(1) from cards_fitting and translate Spanish string
+- race condition in lonko-follow and collapsed-flags duplication
+- **remote**: guard backoff shift against overflow on high fail_count
+- **remote**: address second-round review and remaining round-1 items
+- **remote**: address PR review — shell injection, stale hosts, minor issues
+
 ## v0.13.0 (2026-04-17)
 
 ### Feat
