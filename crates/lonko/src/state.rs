@@ -250,6 +250,27 @@ pub fn save_bookmarks(bookmarks: &HashMap<String, String>) {
     }
 }
 
+// ── Excluded hosts persistence ────────────────────────────────────────────────
+
+fn excluded_hosts_path() -> std::path::PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("lonko-excluded-hosts.json")
+}
+
+pub fn load_excluded_hosts() -> HashSet<String> {
+    std::fs::read_to_string(excluded_hosts_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_excluded_hosts(hosts: &HashSet<String>) {
+    if let Ok(json) = serde_json::to_string_pretty(hosts) {
+        let _ = std::fs::write(excluded_hosts_path(), json);
+    }
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub sessions: Vec<Session>,
@@ -308,6 +329,8 @@ pub struct AppState {
     pub remote_hosts: Vec<RemoteHost>,
     /// Selected index in the flattened Remote tab list.
     pub remote_selected: usize,
+    /// Hostnames excluded from remote polling (persisted to config).
+    pub excluded_hosts: HashSet<String>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
@@ -394,6 +417,10 @@ pub struct RemoteHost {
     pub hostname: String,
     pub status: HostStatus,
     pub sessions: Vec<TmuxSession>,
+    /// Consecutive poll failures (reset on success).
+    pub fail_count: u32,
+    /// Tick number at which this host becomes eligible for polling again.
+    pub next_poll_tick: u64,
 }
 
 #[derive(Debug, Default, PartialEq, Clone)]
@@ -439,6 +466,7 @@ impl Default for AppState {
             collapsed_groups: HashSet::new(),
             remote_hosts: vec![],
             remote_selected: 0,
+            excluded_hosts: HashSet::new(),
         }
     }
 }
@@ -1005,6 +1033,19 @@ impl AppState {
     /// Total number of items in the Remote tab (for clamping selection).
     pub fn remote_item_count(&self) -> usize {
         self.remote_hosts.iter().map(|h| h.sessions.len().max(1)).sum()
+    }
+
+    /// Return the hostname of the currently selected remote item.
+    pub fn selected_remote_host(&self) -> Option<&str> {
+        let mut idx = 0;
+        for host in &self.remote_hosts {
+            let count = host.sessions.len().max(1);
+            if self.remote_selected < idx + count {
+                return Some(&host.hostname);
+            }
+            idx += count;
+        }
+        None
     }
 
     /// Return the (hostname, session_name) for the currently selected remote item.

@@ -40,11 +40,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             session_count: host.sessions.len(),
         });
         if host.sessions.is_empty() {
-            items.push(RenderItem::EmptyHost { flat_idx });
+            items.push(RenderItem::EmptyHost { hostname: &host.hostname, flat_idx });
             flat_idx += 1;
         } else {
             for session in &host.sessions {
                 items.push(RenderItem::Session {
+                    hostname: &host.hostname,
                     name: &session.name,
                     attached: session.attached,
                     has_claude: session.has_claude,
@@ -89,12 +90,22 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         render_item(frame, rect, item, is_selected);
         y += h;
     }
+
+    // Show excluded hosts as a dimmed footer.
+    if !state.excluded_hosts.is_empty() && y + 2 <= area.y + area.height {
+        let mut names: Vec<&str> = state.excluded_hosts.iter().map(|s| s.as_str()).collect();
+        names.sort_unstable();
+        let label = format!(" hidden: {} (X to restore all)", names.join(", "));
+        let line = Line::from(Span::styled(label, Style::default().fg(DIM)));
+        let rect = Rect::new(area.x, y + 1, area.width, 1);
+        frame.render_widget(Paragraph::new(line), rect);
+    }
 }
 
 enum RenderItem<'a> {
     HostHeader { hostname: &'a str, status: &'a HostStatus, session_count: usize },
-    EmptyHost { flat_idx: usize },
-    Session { name: &'a str, attached: bool, has_claude: bool, window_count: usize, age_label: String, flat_idx: usize },
+    EmptyHost { hostname: &'a str, flat_idx: usize },
+    Session { hostname: &'a str, name: &'a str, attached: bool, has_claude: bool, window_count: usize, age_label: String, flat_idx: usize },
 }
 
 fn compute_scroll(heights: &[u16], target: Option<usize>, viewport: u16) -> usize {
@@ -146,16 +157,17 @@ fn render_item(frame: &mut Frame, area: Rect, item: &RenderItem, selected: bool)
             let p = Paragraph::new(vec![line, sep]);
             frame.render_widget(p, area);
         }
-        RenderItem::EmptyHost { .. } => {
+        RenderItem::EmptyHost { hostname, .. } => {
             let bg = if selected { NAV_BG } else { Color::Reset };
             let line = Line::from(vec![
                 Span::raw("    "),
                 Span::styled("no tmux sessions", Style::default().fg(DIM)),
+                Span::styled(format!("  @{hostname}"), Style::default().fg(SSH_ACCENT)),
             ]);
             let p = Paragraph::new(line).style(Style::default().bg(bg));
             frame.render_widget(p, area);
         }
-        RenderItem::Session { name, attached, has_claude, window_count, age_label, .. } => {
+        RenderItem::Session { hostname, name, attached, has_claude, window_count, age_label, .. } => {
             let bg = if selected { NAV_BG } else { Color::Reset };
             let stripe_color = if selected { SSH_ACCENT } else { BORDER_INACTIVE };
             let stripe_type = if selected || *attached {
@@ -164,8 +176,9 @@ fn render_item(frame: &mut Frame, area: Rect, item: &RenderItem, selected: bool)
                 BorderType::Plain
             };
 
-            // Line 1: icon + name + window count
+            // Line 1: icon + name + host@badge
             let icon = if *has_claude { "🤖 " } else { "󰇄 " };
+            let badge = format!("{window_count}w @{hostname}");
             let name_line = Line::from(vec![
                 Span::styled(format!(" {icon}"), Style::default().fg(SSH_ACCENT)),
                 Span::styled(
@@ -175,7 +188,7 @@ fn render_item(frame: &mut Frame, area: Rect, item: &RenderItem, selected: bool)
                 Span::styled(
                     format!(
                         "{:>width$}",
-                        format!("{window_count}w"),
+                        badge,
                         width = area.width.saturating_sub(3 + name.len() as u16 + 2) as usize
                     ),
                     Style::default().fg(DIM),
