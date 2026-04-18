@@ -193,6 +193,7 @@ impl Session {
     ///     repos are visible in the list
     ///   - otherwise takes the last `/`-separated segment of the branch
     ///     name and strips the repo group prefix (+ hyphen) if present
+    ///
     /// Falls back to `project_name` when there is no branch or repo_root.
     ///
     /// Examples (group = "lonko"):
@@ -487,11 +488,10 @@ impl AppState {
         sorted
             .into_iter()
             .filter(|s| {
-                if let Some(repo) = s.repo_root.as_deref() {
-                    if self.collapsed_groups.contains(repo) {
+                if let Some(repo) = s.repo_root.as_deref()
+                    && self.collapsed_groups.contains(repo) {
                         return seen.insert(repo);
                     }
-                }
                 true
             })
             .collect()
@@ -955,9 +955,8 @@ impl AppState {
             if let Some(pane) = hook_pane {
                 session.tmux_pane = Some(pane.to_string());
             }
-            if let Some(tp) = transcript_path {
-                if !tp.is_empty() { session.transcript_path = Some(tp.to_string()); }
-            }
+            if let Some(tp) = transcript_path
+                && !tp.is_empty() { session.transcript_path = Some(tp.to_string()); }
             session.branch = git_branch;
             self.sessions.push(session);
         }
@@ -973,11 +972,10 @@ impl AppState {
         if is_own { return; }
 
         let last = self.sessions.last();
-        if let Some(s) = last {
-            if s.tmux_pane.as_deref() == Some(active) {
+        if let Some(s) = last
+            && s.tmux_pane.as_deref() == Some(active) {
                 self.focused_session_id = Some(s.id.clone());
             }
-        }
     }
 
     /// Auto-select the last session if its pane matches the focus_pane hint.
@@ -1008,13 +1006,6 @@ impl AppState {
             }
             Tab::Remote => Tab::Agents,
         };
-    }
-
-    /// Flat list of all remote sessions across hosts, for navigation.
-    pub fn remote_sessions_flat(&self) -> Vec<(&RemoteHost, &TmuxSession)> {
-        self.remote_hosts.iter()
-            .flat_map(|host| host.sessions.iter().map(move |s| (host, s)))
-            .collect()
     }
 
     /// Total number of items in the Remote tab (for clamping selection).
@@ -1062,6 +1053,7 @@ impl AppState {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 

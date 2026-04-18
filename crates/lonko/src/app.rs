@@ -18,21 +18,6 @@ use crate::{
 
 // ── Pure helpers (testable without App) ────────────────────────────────────────
 
-/// Compute the scroll offset for a list view so the selected item stays centred.
-pub fn compute_scroll_offset(selected: usize, total: usize, visible: usize) -> usize {
-    if total == 0 || visible == 0 {
-        return 0;
-    }
-    let half = visible / 2;
-    if selected < half {
-        0
-    } else if selected + (visible - half) >= total {
-        total.saturating_sub(visible)
-    } else {
-        selected - half
-    }
-}
-
 /// Write the no-follow sentinel so lonko-follow.sh skips the next hook trigger.
 pub fn write_no_follow_sentinel() {
     let sentinel = dirs::cache_dir()
@@ -445,12 +430,11 @@ impl App {
     fn focus_tmux_session(&mut self) {
         let Some(session) = self.state.selected_tmux_session() else { return };
         let name = session.name.clone();
-        if let Some(win_idx) = self.state.tmux_window_cursor {
-            if let Some(window) = session.windows.get(win_idx) {
+        if let Some(win_idx) = self.state.tmux_window_cursor
+            && let Some(window) = session.windows.get(win_idx) {
                 let _ = tmux::focus_session_window(&name, window.index);
                 return;
             }
-        }
         let _ = std::process::Command::new("tmux")
             .args(["switch-client", "-t", &name])
             .status();
@@ -714,13 +698,12 @@ impl App {
             }
 
         // Update cwd if available (skip for subagents — they share the parent's cwd)
-        if !is_subagent {
-            if let Some(cwd) = &payload.cwd
+        if !is_subagent
+            && let Some(cwd) = &payload.cwd
                 && !cwd.is_empty() && session.cwd != *cwd {
                     session.cwd = cwd.clone();
                     session.project_name = cwd.split('/').next_back().unwrap_or(cwd).to_string();
                 }
-        }
 
         session.last_activity = std::time::Instant::now();
 
@@ -773,7 +756,7 @@ impl App {
                 }
             }
             Event::Key(key)                                   => return self.on_key(key),
-            Event::Hook(payload)                              => self.handle_hook(payload),
+            Event::Hook(payload)                              => self.handle_hook(*payload),
             Event::FocusGained                                => self.state.focused = true,
             Event::FocusLost                                  => self.state.focused = false,
             Event::Mouse(mouse) => {
@@ -900,9 +883,8 @@ impl App {
 
                 for peer in peers {
                     if excluded.contains(&peer.hostname) { continue; }
-                    if let Some(&next_tick) = known_hosts.get(&peer.hostname) {
-                        if tick < next_tick { continue; }
-                    }
+                    if let Some(&next_tick) = known_hosts.get(&peer.hostname)
+                        && tick < next_tick { continue; }
                     let tx = tx.clone();
                     let host = peer.hostname.clone();
                     tokio::task::spawn_blocking(move || {
@@ -1057,8 +1039,8 @@ impl App {
     fn on_key(&mut self, key: crossterm::event::KeyEvent) -> Result<bool> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if self.state.bookmark_mode {
-            if let Some(note) = self.state.apply_bookmark_key(key.code, ctrl) {
-                if let Some(session) = self.state.selected_session() {
+            if let Some(note) = self.state.apply_bookmark_key(key.code, ctrl)
+                && let Some(session) = self.state.selected_session() {
                     let cwd = session.cwd.clone();
                     if note.is_empty() {
                         self.state.bookmarks.remove(&cwd);
@@ -1067,7 +1049,6 @@ impl App {
                     }
                     crate::state::save_bookmarks(&self.state.bookmarks);
                 }
-            }
             return Ok(false);
         }
         if self.state.new_agent_mode {
@@ -1195,11 +1176,10 @@ impl App {
                 if self.state.active_tab == Tab::Agents =>
             {
                 // Toggle collapse on the selected session's repo group.
-                if let Some(session) = self.state.selected_session() {
-                    if let Some(repo) = session.repo_root.clone() {
+                if let Some(session) = self.state.selected_session()
+                    && let Some(repo) = session.repo_root.clone() {
                         self.state.toggle_group_collapse(&repo);
                     }
-                }
             }
             KeyCode::Char(' ')
                 if self.state.active_tab == Tab::Sessions =>
@@ -1377,8 +1357,8 @@ impl App {
             }
 
             // Try to clean up merged branches if we have the necessary info.
-            if let (Some(branch), Some(repo)) = (branch, main_repo) {
-                if let Some(result) = crate::worktree::cleanup_merged_branch(&repo, &branch) {
+            if let (Some(branch), Some(repo)) = (branch, main_repo)
+                && let Some(result) = crate::worktree::cleanup_merged_branch(&repo, &branch) {
                     let msg = match (result.local_deleted, result.remote_deleted) {
                         (true, true) => format!(
                             "cleaned up local + remote branch '{branch}' (PR merged)"
@@ -1395,7 +1375,6 @@ impl App {
                     };
                     tmux::display_message(&msg);
                 }
-            }
         });
     }
 
@@ -1405,13 +1384,11 @@ impl App {
         let Some(ts) = self.state.selected_tmux_session() else { return };
 
         // Never kill lonko's own tmux session.
-        if let Some(own_pane) = &self.state.own_pane {
-            if let Some(own_sess) = tmux_session_for_pane(own_pane) {
-                if own_sess == ts.name {
+        if let Some(own_pane) = &self.state.own_pane
+            && let Some(own_sess) = tmux_session_for_pane(own_pane)
+                && own_sess == ts.name {
                     return;
                 }
-            }
-        }
 
         let name = ts.name.clone();
         std::thread::spawn(move || {
@@ -1578,7 +1555,6 @@ mod tests {
             message: None,
             notification_type: None,
             tmux_pane: None,
-            parent_session_id: None,
             agent_id: None,
             agent_type: None,
             agent_transcript_path: None,
@@ -1587,37 +1563,6 @@ mod tests {
 
     fn mk_session() -> Session {
         Session::new("s1".into(), 100, "/tmp/proj".into())
-    }
-
-    // ── compute_scroll_offset ──────────────────────────────────────────────
-
-    #[test]
-    fn scroll_offset_at_start() {
-        assert_eq!(compute_scroll_offset(0, 10, 5), 0);
-        assert_eq!(compute_scroll_offset(1, 10, 5), 0);
-    }
-
-    #[test]
-    fn scroll_offset_centres_selection() {
-        // selected=5, total=20, visible=5 → half=2, so scroll=5-2=3
-        assert_eq!(compute_scroll_offset(5, 20, 5), 3);
-    }
-
-    #[test]
-    fn scroll_offset_clamps_at_end() {
-        // selected=9 (last), total=10, visible=5 → 10-5=5
-        assert_eq!(compute_scroll_offset(9, 10, 5), 5);
-    }
-
-    #[test]
-    fn scroll_offset_empty_list() {
-        assert_eq!(compute_scroll_offset(0, 0, 5), 0);
-        assert_eq!(compute_scroll_offset(0, 5, 0), 0);
-    }
-
-    #[test]
-    fn scroll_offset_visible_equals_total() {
-        assert_eq!(compute_scroll_offset(3, 5, 5), 0);
     }
 
     // ── hook_event_to_status ───────────────────────────────────────────────

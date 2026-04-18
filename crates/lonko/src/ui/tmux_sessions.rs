@@ -146,10 +146,10 @@ pub fn session_page_layout(
 
     let mut used: u16 = 0;
     let mut cards: Vec<CardLayout> = Vec::new();
-    for global_idx in scroll..total {
+    for (global_idx, session) in sessions.iter().enumerate().skip(scroll) {
         let is_sel = global_idx == selected;
         let exp = is_sel && expanded;
-        let h = card_height(sessions[global_idx], exp);
+        let h = card_height(session, exp);
         let sep = if cards.is_empty() { 0 } else { SEP_HEIGHT };
         let needed = h + sep;
         if used + needed > list_h && !cards.is_empty() {

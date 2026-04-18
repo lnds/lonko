@@ -96,11 +96,10 @@ fn copy_claude_config(source_root: &str, worktree_path: &Path) {
     let dir = crate::agents::claude::DIR_NAME;
     let src = PathBuf::from(source_root).join(dir);
     let dst = worktree_path.join(dir);
-    if src.is_dir() && !dst.exists() {
-        if let Err(e) = copy_dir_recursive(&src, &dst) {
+    if src.is_dir() && !dst.exists()
+        && let Err(e) = copy_dir_recursive(&src, &dst) {
             eprintln!("warning: failed to copy {dir} config to worktree: {e}");
         }
-    }
 }
 
 /// Copy well-known dotfiles from the source repo into a new worktree.

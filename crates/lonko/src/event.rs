@@ -15,7 +15,7 @@ pub enum Event {
     /// A session file was removed (session ended)
     SessionRemoved(u32),
     /// A Claude Code hook event received via Unix socket
-    Hook(HookPayload),
+    Hook(Box<HookPayload>),
     /// A tmux pane with a running Claude process was discovered by the scanner
     TmuxPaneDiscovered { pane_id: String, claude_pid: u32, cwd: String },
     /// A tmux pane that had Claude is gone (process exited)

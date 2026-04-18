@@ -31,7 +31,6 @@ pub struct HookPayload {
     // Enriched by lonko-hook
     pub tmux_pane: Option<String>,
     // Subagent fields (present when hook fires from a subagent context)
-    pub parent_session_id: Option<String>,
     pub agent_id: Option<String>,
     pub agent_type: Option<String>,
     pub agent_transcript_path: Option<String>,
@@ -62,7 +61,7 @@ pub fn spawn_listener(tx: UnboundedSender<Event>) -> Result<()> {
                             }
                             match serde_json::from_str::<HookPayload>(&line) {
                                 Ok(payload) => {
-                                    let _ = tx.send(Event::Hook(payload));
+                                    let _ = tx.send(Event::Hook(Box::new(payload)));
                                 }
                                 Err(_) => {
                                     // Try parsing as a permission command: "permission <y|n|w>"

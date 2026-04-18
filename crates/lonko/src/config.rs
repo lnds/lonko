@@ -21,7 +21,7 @@ fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub remote: RemoteConfig,
@@ -32,14 +32,6 @@ pub struct Config {
 pub struct RemoteConfig {
     pub enabled: bool,
     pub poll_interval_secs: u64,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            remote: RemoteConfig::default(),
-        }
-    }
 }
 
 impl Default for RemoteConfig {

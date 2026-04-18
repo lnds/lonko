@@ -177,11 +177,10 @@ pub(crate) fn compute_header_and_collapsed(
     // Force header for collapsed groups: after filtering, only 1 session
     // remains visible so compute_header_flags won't mark it as multi-agent.
     for (i, s) in visible.iter().enumerate() {
-        if let Some(repo) = s.repo_root.as_deref() {
-            if state.is_group_collapsed(repo) && state.group_agent_count(repo) >= 2 {
+        if let Some(repo) = s.repo_root.as_deref()
+            && state.is_group_collapsed(repo) && state.group_agent_count(repo) >= 2 {
                 header_flags[i] = true;
             }
-        }
     }
     let collapsed_flags: Vec<bool> = visible
         .iter()
@@ -386,8 +385,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         if i + 1 >= page.len() { break; }
         let a = scroll + i;
         let b = a + 1;
-        if group_keys[a].is_some() && group_keys[a] == group_keys[b] {
-            if let (_, Some(card_idx)) = slot_chunks[i] {
+        if group_keys[a].is_some() && group_keys[a] == group_keys[b]
+            && let (_, Some(card_idx)) = slot_chunks[i] {
                 let sep_idx = card_idx + 1;
                 if sep_idx < chunks.len() {
                     let sep = chunks[sep_idx];
@@ -403,7 +402,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
                     }
                 }
             }
-        }
     }
 
     for (i, session) in page.iter().enumerate() {
@@ -412,8 +410,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         let selected = global_idx == state.selected;
         let is_collapsed = collapsed_flags[global_idx];
 
-        if let Some(hdr_idx) = header_idx {
-            if hdr_idx < chunks.len() {
+        if let Some(hdr_idx) = header_idx
+            && hdr_idx < chunks.len() {
                 let agent_count = session
                     .repo_root
                     .as_deref()
@@ -421,7 +419,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
                     .unwrap_or(0);
                 render_group_header(frame, chunks[hdr_idx], session, is_collapsed, selected, agent_count);
             }
-        }
 
         // Collapsed groups show only the header, no card.
         if is_collapsed {
