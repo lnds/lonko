@@ -24,4 +24,7 @@ pub enum Event {
     PermissionResponse(String),
     /// A snapshot of tmux sessions from a remote Tailnet host
     RemoteSnapshot(crate::sources::remote_tmux::RemoteSnapshot),
+    /// The set of hostnames that were online during the latest Tailnet poll.
+    /// Used to prune stale hosts that are no longer in the peer list.
+    RemotePeersOnline(Vec<String>),
 }

@@ -253,9 +253,11 @@ pub fn save_bookmarks(bookmarks: &HashMap<String, String>) {
 // ── Excluded hosts persistence ────────────────────────────────────────────────
 
 fn excluded_hosts_path() -> std::path::PathBuf {
-    dirs::cache_dir()
+    let dir = dirs::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("lonko-excluded-hosts.json")
+        .join("lonko");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("excluded-hosts.json")
 }
 
 pub fn load_excluded_hosts() -> HashSet<String> {
@@ -406,7 +408,7 @@ impl TmuxSession {
 
 // ── Remote hosts ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostStatus {
     Online,
     Unreachable,

@@ -502,11 +502,15 @@ impl App {
     }
 
     /// Open a new tmux window that SSH-attaches to the selected remote session.
+    /// Arguments are passed directly to avoid shell injection via crafted
+    /// hostnames or session names.
     fn attach_remote_session(&self) {
         let Some((host, session_name)) = self.state.selected_remote_session() else { return };
-        let ssh_cmd = format!("ssh {} -t 'tmux attach-session -t {}'", host, session_name);
+        let win_name = format!("{}:{}", host, session_name);
+        let attach_cmd = format!("tmux attach-session -t {}", session_name);
         let _ = std::process::Command::new("tmux")
-            .args(["new-window", "-n", &format!("{}:{}", host, session_name), "--", "sh", "-c", &ssh_cmd])
+            .args(["new-window", "-n", &win_name, "--",
+                   "ssh", host, "-t", &attach_cmd])
             .status();
     }
 
@@ -810,6 +814,16 @@ impl App {
             Event::RemoteSnapshot(snapshot) => {
                 self.on_remote_snapshot(snapshot);
             }
+            Event::RemotePeersOnline(online) => {
+                // Remove hosts that are no longer in the Tailnet peer list.
+                self.state.remote_hosts.retain(|h| online.contains(&h.hostname));
+                let count = self.state.remote_item_count();
+                if count > 0 {
+                    self.state.remote_selected = self.state.remote_selected.min(count - 1);
+                } else {
+                    self.state.remote_selected = 0;
+                }
+            }
         }
         Ok(false)
     }
@@ -895,6 +909,11 @@ impl App {
                         return;
                     }
                 };
+                let online_names: Vec<String> = peers.iter()
+                    .filter(|p| !excluded.contains(&p.hostname))
+                    .map(|p| p.hostname.clone())
+                    .collect();
+
                 for peer in peers {
                     if excluded.contains(&peer.hostname) {
                         continue;
@@ -923,6 +942,10 @@ impl App {
                         }
                     }
                 }
+
+                // Notify the event loop which peers are online so stale hosts
+                // can be pruned.
+                let _ = tx.send(Event::RemotePeersOnline(online_names));
             });
         }
     }

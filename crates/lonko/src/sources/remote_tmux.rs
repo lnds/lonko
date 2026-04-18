@@ -54,12 +54,12 @@ pub fn poll_host(host: &str) -> Result<RemoteSnapshot> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_poll_output(host, &stdout)
+    Ok(parse_poll_output(host, &stdout))
 }
 
 // ── Parsing ─────────────────────────────────────────────────────────────────────
 
-fn parse_poll_output(host: &str, output: &str) -> Result<RemoteSnapshot> {
+fn parse_poll_output(host: &str, output: &str) -> RemoteSnapshot {
     let mut sessions_block = String::new();
     let mut windows_block = String::new();
     let mut panes_block = String::new();
@@ -142,7 +142,7 @@ fn parse_poll_output(host: &str, output: &str) -> Result<RemoteSnapshot> {
         }
     }
 
-    Ok(RemoteSnapshot { host: host.to_string(), sessions, is_error: false })
+    RemoteSnapshot { host: host.to_string(), sessions, is_error: false }
 }
 
 /// Parsed process: (pid, ppid, comm).
@@ -236,7 +236,7 @@ work\x011100
 
     #[test]
     fn parses_sessions_with_windows() {
-        let snap = parse_poll_output("testhost", POLL_OUTPUT).unwrap();
+        let snap = parse_poll_output("testhost", POLL_OUTPUT);
         assert_eq!(snap.host, "testhost");
         assert_eq!(snap.sessions.len(), 2);
 
@@ -258,7 +258,7 @@ work\x011100
 
     #[test]
     fn detects_claude_in_correct_session() {
-        let snap = parse_poll_output("testhost", POLL_OUTPUT).unwrap();
+        let snap = parse_poll_output("testhost", POLL_OUTPUT);
         // claude (3000) → node (2000) → bash (1100) which is pane_pid of "work"
         assert!(!snap.sessions[0].has_claude, "main should not have claude");
         assert!(snap.sessions[1].has_claude, "work should have claude");
@@ -266,7 +266,7 @@ work\x011100
 
     #[test]
     fn session_origin_is_remote() {
-        let snap = parse_poll_output("testhost", POLL_OUTPUT).unwrap();
+        let snap = parse_poll_output("testhost", POLL_OUTPUT);
         for s in &snap.sessions {
             assert!(s.origin.is_remote());
             assert_eq!(s.origin.host_label(), "testhost");
@@ -276,7 +276,7 @@ work\x011100
     #[test]
     fn empty_tmux_returns_empty_sessions() {
         let output = "---WINDOWS---\n---PANES---\n---PROCS---\n  PID  PPID COMM\n    1     0 init\n";
-        let snap = parse_poll_output("emptyhost", output).unwrap();
+        let snap = parse_poll_output("emptyhost", output);
         assert!(snap.sessions.is_empty());
     }
 
@@ -294,7 +294,7 @@ dev\x015000
  5000     1 bash
  5001  5000 vim
 ";
-        let snap = parse_poll_output("host", output).unwrap();
+        let snap = parse_poll_output("host", output);
         assert!(!snap.sessions[0].has_claude);
     }
 }
