@@ -250,29 +250,6 @@ pub fn save_bookmarks(bookmarks: &HashMap<String, String>) {
     }
 }
 
-// ── Excluded hosts persistence ────────────────────────────────────────────────
-
-fn excluded_hosts_path() -> std::path::PathBuf {
-    let dir = dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("lonko");
-    let _ = std::fs::create_dir_all(&dir);
-    dir.join("excluded-hosts.json")
-}
-
-pub fn load_excluded_hosts() -> HashSet<String> {
-    std::fs::read_to_string(excluded_hosts_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-pub fn save_excluded_hosts(hosts: &HashSet<String>) {
-    if let Ok(json) = serde_json::to_string_pretty(hosts) {
-        let _ = std::fs::write(excluded_hosts_path(), json);
-    }
-}
-
 #[derive(Debug)]
 pub struct AppState {
     pub sessions: Vec<Session>,
@@ -333,6 +310,10 @@ pub struct AppState {
     pub remote_selected: usize,
     /// Hostnames excluded from remote polling (persisted to config).
     pub excluded_hosts: HashSet<String>,
+    /// Whether the Remote tab is enabled (from config).
+    pub remote_enabled: bool,
+    /// Remote poll interval in ticks (poll_interval_secs * 10).
+    pub remote_poll_ticks: u64,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
@@ -469,6 +450,8 @@ impl Default for AppState {
             remote_hosts: vec![],
             remote_selected: 0,
             excluded_hosts: HashSet::new(),
+            remote_enabled: false,
+            remote_poll_ticks: 100, // 10s default
         }
     }
 }
@@ -1020,7 +1003,9 @@ impl AppState {
     pub fn toggle_tab(&mut self) {
         self.active_tab = match self.active_tab {
             Tab::Agents => Tab::Sessions,
-            Tab::Sessions => Tab::Remote,
+            Tab::Sessions => {
+                if self.remote_enabled { Tab::Remote } else { Tab::Agents }
+            }
             Tab::Remote => Tab::Agents,
         };
     }
@@ -1406,8 +1391,20 @@ mod tests {
     }
 
     #[test]
-    fn toggle_tab_cycles() {
+    fn toggle_tab_cycles_without_remote() {
         let mut state = AppState::default();
+        assert!(!state.remote_enabled);
+        assert_eq!(state.active_tab, Tab::Agents);
+        state.toggle_tab();
+        assert_eq!(state.active_tab, Tab::Sessions);
+        state.toggle_tab();
+        assert_eq!(state.active_tab, Tab::Agents); // skips Remote
+    }
+
+    #[test]
+    fn toggle_tab_cycles_with_remote() {
+        let mut state = AppState::default();
+        state.remote_enabled = true;
         assert_eq!(state.active_tab, Tab::Agents);
         state.toggle_tab();
         assert_eq!(state.active_tab, Tab::Sessions);

@@ -129,7 +129,10 @@ impl App {
     pub fn new() -> Self {
         let mut state = AppState::default();
         state.bookmarks = crate::state::load_bookmarks();
-        state.excluded_hosts = crate::state::load_excluded_hosts();
+        let config = crate::config::load();
+        state.remote_enabled = config.remote.enabled;
+        state.remote_poll_ticks = config.remote.poll_interval_secs.max(1) * 10;
+        state.excluded_hosts = config.remote.excluded_hosts;
         Self {
             state,
             scan_tx: None,
@@ -498,7 +501,7 @@ impl App {
                 self.state.remote_selected = 0;
             }
         }
-        crate::state::save_excluded_hosts(&self.state.excluded_hosts);
+        crate::config::save_excluded_hosts(&self.state.excluded_hosts);
     }
 
     /// Open a new tmux window that SSH-attaches to the selected remote session.
@@ -1214,7 +1217,7 @@ impl App {
                 self.state.tmux_window_cursor = None;
                 self.state.tmux_expanded = false;
             }
-            KeyCode::Char('r' | 'R') => {
+            KeyCode::Char('r' | 'R') if self.state.remote_enabled => {
                 self.state.active_tab = Tab::Remote;
                 self.state.tmux_window_cursor = None;
                 self.state.tmux_expanded = false;
@@ -1292,7 +1295,7 @@ impl App {
                         // Restore all excluded hosts.
                         if !self.state.excluded_hosts.is_empty() {
                             self.state.excluded_hosts.clear();
-                            crate::state::save_excluded_hosts(&self.state.excluded_hosts);
+                            crate::config::save_excluded_hosts(&self.state.excluded_hosts);
                         }
                     }
                 }

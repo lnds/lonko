@@ -1,5 +1,6 @@
 mod agents;
 mod app;
+mod config;
 mod control;
 mod event;
 mod focus;

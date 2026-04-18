@@ -50,7 +50,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     } else {
         Color::Rgb(169, 177, 214)
     };
-    let tab_titles = vec![
+    let mut tab_titles = vec![
         Line::from(vec![
             Span::styled("A", Style::default().fg(agents_color).add_modifier(Modifier::UNDERLINED)),
             Span::styled("gents", Style::default().fg(agents_color)),
@@ -59,11 +59,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             Span::styled("S", Style::default().fg(sessions_color).add_modifier(Modifier::UNDERLINED)),
             Span::styled("essions", Style::default().fg(sessions_color)),
         ]),
-        Line::from(vec![
+    ];
+    if state.remote_enabled {
+        tab_titles.push(Line::from(vec![
             Span::styled("R", Style::default().fg(remote_color).add_modifier(Modifier::UNDERLINED)),
             Span::styled("emote", Style::default().fg(remote_color)),
-        ]),
-    ];
+        ]));
+    }
 
     let selected_tab = match state.active_tab {
         Tab::Agents => 0,
