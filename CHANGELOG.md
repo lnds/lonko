@@ -1,3 +1,13 @@
+## v0.14.1 (2026-04-20)
+
+### Fix
+
+- ignore detached HEAD sentinel when reading branch from transcript
+
+### Refactor
+
+- remove dead code and fix clippy warnings
+
 ## v0.14.0 (2026-04-18)
 
 ### Feat
