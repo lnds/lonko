@@ -99,7 +99,8 @@ pub fn read_latest(path: &Path) -> Option<TranscriptInfo> {
         };
 
         if let Some(b) = val["gitBranch"].as_str()
-            && !b.is_empty() {
+            && !b.is_empty()
+            && b != "HEAD" {
                 branch = Some(b.to_string());
             }
 
