@@ -115,6 +115,11 @@ pub struct App {
     /// Hosts with a bridge start currently in flight on a blocking task.
     /// Prevents double-spawn while the task is pending.
     remote_bridge_starting: std::collections::HashSet<String>,
+    /// Latest Tailnet peers reported as online (before excluded-host filtering).
+    /// Populated every time a `RemotePeersOnline` event lands; read by
+    /// `sync_remote_bridges` so bridges can be kept alive regardless of
+    /// which tab the user is on.
+    remote_online_hosts: std::collections::HashSet<String>,
 }
 
 impl App {
@@ -132,6 +137,7 @@ impl App {
             focus_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             remote_bridges: std::collections::HashMap::new(),
             remote_bridge_starting: std::collections::HashSet::new(),
+            remote_online_hosts: std::collections::HashSet::new(),
         }
     }
 
@@ -817,6 +823,10 @@ impl App {
                 self.on_remote_snapshot(snapshot);
             }
             Event::RemotePeersOnline(online) => {
+                // Cache the set of hosts so `sync_remote_bridges` can reach
+                // them even when the Remote tab isn't open (tmux polling
+                // is gated by the active tab, but bridges are not).
+                self.remote_online_hosts = online.iter().cloned().collect();
                 // Remove hosts that are no longer in the Tailnet peer list.
                 self.state.remote_hosts.retain(|h| online.contains(&h.hostname));
                 let count = self.state.remote_item_count();
@@ -899,33 +909,18 @@ impl App {
             tmux_scanner::scan(tx, &known_panes, self.state.own_pane.as_deref());
         }
 
-        // Reconcile SSH reverse-tunnel bridges with the currently online
-        // Tailnet hosts every 2s. Independent from the Remote-tab poll
-        // rhythm: bridges must keep flowing even when the user is on
-        // the Agents tab.
-        if self.state.remote_enabled && self.state.tick.is_multiple_of(20) {
-            self.sync_remote_bridges();
-        }
-
-        // Poll remote Tailnet hosts, only while the Remote tab is active.
-        // Each host has its own next_poll_tick based on backoff; we check every tick.
-        if self.state.active_tab == Tab::Remote
-            && self.state.tick.is_multiple_of(10) // check eligibility every 1s
+        // Tailnet peer discovery runs on the background of every 2s tick
+        // whenever remote support is enabled, independent of the active
+        // tab. The resulting `RemotePeersOnline` event is what keeps
+        // `sync_remote_bridges` informed — without it, bridges would
+        // only come up while the user happens to be looking at the
+        // Remote tab.
+        if self.state.remote_enabled
+            && self.state.tick.is_multiple_of(20)
             && let Some(ref tx) = self.scan_tx
         {
-            let tick = self.state.tick;
             let excluded = self.state.excluded_hosts.clone();
-
-            // Collect hosts that are due for polling.
-            let known_hosts: std::collections::HashMap<String, u64> = self.state.remote_hosts
-                .iter()
-                .map(|h| (h.hostname.clone(), h.next_poll_tick))
-                .collect();
-
             let tx = tx.clone();
-            // Discover peers (fast, local command) then spawn one blocking
-            // task per eligible host so a slow/unreachable host doesn't
-            // block the others.
             tokio::spawn(async move {
                 let peers = match tokio::task::spawn_blocking(
                     crate::sources::tailnet::list_online_peers
@@ -934,59 +929,76 @@ impl App {
                     Ok(Err(e)) => { tracing::warn!("tailnet discovery failed: {e}"); return; }
                     Err(e) => { tracing::warn!("tailnet task panicked: {e}"); return; }
                 };
-
-                let online_names: Vec<String> = peers.iter()
-                    .filter(|p| !excluded.contains(&p.hostname))
-                    .map(|p| p.hostname.clone())
+                let online_names: Vec<String> = peers.into_iter()
+                    .map(|p| p.hostname)
+                    .filter(|h| !excluded.contains(h))
                     .collect();
-
-                for peer in peers {
-                    if excluded.contains(&peer.hostname) { continue; }
-                    if let Some(&next_tick) = known_hosts.get(&peer.hostname)
-                        && tick < next_tick { continue; }
-                    let tx = tx.clone();
-                    let host = peer.hostname.clone();
-                    tokio::task::spawn_blocking(move || {
-                        match crate::sources::remote_tmux::poll_host(&host) {
-                            Ok(snapshot) => {
-                                let _ = tx.send(Event::RemoteSnapshot(snapshot));
-                            }
-                            Err(e) => {
-                                tracing::debug!("remote poll {host} failed: {e}");
-                                let _ = tx.send(Event::RemoteSnapshot(
-                                    crate::sources::remote_tmux::RemoteSnapshot {
-                                        host: host.clone(),
-                                        sessions: vec![],
-                                        is_error: true,
-                                    },
-                                ));
-                            }
-                        }
-                    });
-                }
-
                 let _ = tx.send(Event::RemotePeersOnline(online_names));
             });
+
+            self.sync_remote_bridges();
+        }
+
+        // Per-host tmux polling stays scoped to the Remote tab so that
+        // the per-second SSH burst does not run when the user isn't
+        // looking at its output. Uses the cached online set populated
+        // by the background discovery above.
+        if self.state.active_tab == Tab::Remote
+            && self.state.tick.is_multiple_of(10)
+            && let Some(ref tx) = self.scan_tx
+        {
+            let tick = self.state.tick;
+            let online = self.remote_online_hosts.clone();
+
+            let known_hosts: std::collections::HashMap<String, u64> = self.state.remote_hosts
+                .iter()
+                .map(|h| (h.hostname.clone(), h.next_poll_tick))
+                .collect();
+
+            for host in online {
+                if let Some(&next_tick) = known_hosts.get(&host)
+                    && tick < next_tick { continue; }
+                let tx = tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    match crate::sources::remote_tmux::poll_host(&host) {
+                        Ok(snapshot) => {
+                            let _ = tx.send(Event::RemoteSnapshot(snapshot));
+                        }
+                        Err(e) => {
+                            tracing::debug!("remote poll {host} failed: {e}");
+                            let _ = tx.send(Event::RemoteSnapshot(
+                                crate::sources::remote_tmux::RemoteSnapshot {
+                                    host: host.clone(),
+                                    sessions: vec![],
+                                    is_error: true,
+                                },
+                            ));
+                        }
+                    }
+                });
+            }
         }
     }
 
     /// Reconcile `remote_bridges` with the set of hosts that are currently
-    /// Online and not excluded. Starts a bridge for each host that needs
-    /// one; drops bridges whose host fell off the list or whose SSH child
-    /// has exited. Start attempts run on a blocking task so the short
-    /// preparatory SSH probe does not stall the UI; the resulting
-    /// `RemoteBridge` arrives via `Event::RemoteBridgeStarted`.
+    /// reachable on the Tailnet and not excluded. Starts a bridge for
+    /// each host that needs one; drops bridges whose host fell off the
+    /// list or whose SSH child has exited. Start attempts run on a
+    /// blocking task so the short preparatory SSH probe does not stall
+    /// the UI; the resulting `RemoteBridge` arrives via
+    /// `Event::RemoteBridgeStarted`.
     fn sync_remote_bridges(&mut self) {
         let Some(ref tx) = self.scan_tx else { return };
 
-        // Desired set: online hosts that are not excluded.
+        // Desired set: latest Tailnet peers, minus any explicitly excluded
+        // by the user. Uses the cache populated on `RemotePeersOnline`
+        // rather than `remote_hosts` (which is only filled when the
+        // Remote tab has been activated).
         let desired: std::collections::HashSet<String> = self
-            .state
-            .remote_hosts
+            .remote_online_hosts
             .iter()
-            .filter(|h| matches!(h.status, crate::state::HostStatus::Online))
-            .filter(|h| !self.state.excluded_hosts.contains(&h.hostname))
-            .map(|h| h.hostname.clone())
+            .filter(|h| !self.state.excluded_hosts.contains(*h))
+            .cloned()
             .collect();
 
         // Drop bridges for hosts that should no longer have one, and
