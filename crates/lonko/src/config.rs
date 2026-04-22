@@ -12,8 +12,13 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 fn config_dir() -> PathBuf {
-    dirs::config_dir()
+    // Always `$HOME/.config/lonko` — `dirs::config_dir()` resolves to
+    // macOS's `~/Library/Application Support` on Darwin, but lonko is
+    // a CLI tool and users expect the XDG-style location on every
+    // platform.
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".config")
         .join("lonko")
 }
 
