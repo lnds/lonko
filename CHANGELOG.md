@@ -1,3 +1,25 @@
+## v0.15.0 (2026-04-22)
+
+### Feat
+
+- **remote**: distinguish remote agents visually in the Agents tab
+- **remote**: SSH reverse-tunnel bridge for remote Claude hooks
+- **remote**: split lonko-hook socket path by invocation
+- **remote**: stamp hook events with --remote-tag host
+- **remote**: add install-remote subcommand to provision Tailnet hosts
+
+### Fix
+
+- **remote**: make focus a no-op for remote agents in Agents tab
+- **remote**: silence ssh post-quantum warning on internal calls
+- **remote**: unlink stale bridge socket on remote before ssh -R
+- **remote**: bind bridge socket under /tmp to work around macOS sshd sandbox
+- **remote**: stop tmux_scanner from pruning remote sessions
+- **config**: always read config from $HOME/.config/lonko
+- **remote**: keep bridges alive regardless of the active tab
+- **install-remote**: force net.git-fetch-with-cli so cargo respects user git config
+- **ui**: stabilize within-group agent order in Agents tab
+
 ## v0.14.1 (2026-04-20)
 
 ### Fix
