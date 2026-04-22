@@ -10,16 +10,21 @@ use std::os::unix::net::UnixStream;
 ///
 /// Local invocations use `~/.claude/lonko.sock` — the same socket the local
 /// `lonko` TUI listens on. When `--remote-tag` is set, we switch to
-/// `~/.claude/lonko-bridge.sock`, which the SSH reverse tunnel (LONKO-49)
-/// forwards to the operator's local `lonko`. The two-path split keeps the
-/// invariant that the unsuffixed socket belongs to *this* machine's lonko,
-/// even on hosts where someone also runs lonko locally.
+/// `/tmp/lonko-bridge-<user>.sock`, which the SSH reverse tunnel (LONKO-49)
+/// forwards to the operator's local `lonko`. The `/tmp` path is required
+/// because macOS sshd's sandbox profile prevents it from binding a
+/// listening socket under `~/.claude/`; `/tmp` is writable for sshd on
+/// every platform we care about. Including the username in the socket
+/// name keeps per-user paths unique on shared hosts.
 fn socket_path(remote: bool) -> std::path::PathBuf {
-    let name = if remote { "lonko-bridge.sock" } else { "lonko.sock" };
+    if remote {
+        let user = std::env::var("USER").unwrap_or_else(|_| "anon".to_string());
+        return std::path::PathBuf::from(format!("/tmp/lonko-bridge-{user}.sock"));
+    }
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
         .join(".claude")
-        .join(name)
+        .join("lonko.sock")
 }
 
 fn log_path() -> std::path::PathBuf {

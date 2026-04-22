@@ -26,11 +26,14 @@ pub struct RemoteBridge {
 
 impl RemoteBridge {
     /// Spawn the SSH child for `host`. Blocks on one preparatory SSH call
-    /// to discover the remote `$HOME`, so prefer calling this from a
-    /// blocking task when the UI must stay responsive.
+    /// to discover the remote user's login name, so prefer calling this
+    /// from a blocking task when the UI must stay responsive.
     pub fn start(host: &str) -> Result<Self> {
-        let remote_home = query_remote_home(host)?;
-        let remote_bind = format!("{remote_home}/.claude/lonko-bridge.sock");
+        let remote_user = query_remote_user(host)?;
+        // /tmp rather than the remote $HOME/.claude: macOS sshd's sandbox
+        // refuses to bind a listening socket under the user's home dir.
+        // Matches the path lonko-hook writes to when given `--remote-tag`.
+        let remote_bind = format!("/tmp/lonko-bridge-{remote_user}.sock");
         let local_sock = claude::socket_path();
         let forward = format!("{}:{}", remote_bind, local_sock.display());
 
@@ -91,28 +94,27 @@ impl Drop for RemoteBridge {
     }
 }
 
-/// Resolve the remote user's `$HOME`. The value is needed at ssh-client
-/// parse time for the `-R` bind path, which does not go through a remote
-/// shell and therefore does not expand `$HOME`.
-fn query_remote_home(host: &str) -> Result<String> {
+/// Resolve the remote user's login name. Needed to build the `/tmp`
+/// socket path that matches what `lonko-hook --remote-tag` writes to.
+fn query_remote_user(host: &str) -> Result<String> {
     let output = Command::new("ssh")
         .args([
             "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=5",
             host,
-            "printf", "%s", "$HOME",
+            "printf", "%s", "$USER",
         ])
         .output()
-        .with_context(|| format!("failed to probe $HOME on {host}"))?;
+        .with_context(|| format!("failed to probe $USER on {host}"))?;
     if !output.status.success() {
         anyhow::bail!(
-            "could not read $HOME on {host}: {}",
+            "could not read $USER on {host}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if home.is_empty() {
-        anyhow::bail!("empty $HOME on {host}");
+    let user = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if user.is_empty() {
+        anyhow::bail!("empty $USER on {host}");
     }
-    Ok(home)
+    Ok(user)
 }

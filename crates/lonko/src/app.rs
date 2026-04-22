@@ -226,14 +226,17 @@ impl App {
         let h = self.state.term_height;
 
         // Header click (rows 0-2): switch tabs based on column position.
-        // Tab labels in the inner row (row 1): "Agents" (cols 1-6) │ "Sessions" (cols 10-17)
-        // Boundary at col 9 (middle of the divider " │ ").
+        // Tab labels in the inner row (row 1):
+        //   "Agents" (cols 1-6) │ "Sessions" (cols 10-17) │ "Remote" (cols 21-26)
+        // Boundaries at col 9 and col 20 (the middles of the " │ " dividers).
         if row < 3 {
             if row == 1 {
                 if _col <= 9 {
                     self.state.active_tab = Tab::Agents;
-                } else {
+                } else if _col <= 20 || !self.state.remote_enabled {
                     self.state.active_tab = Tab::Sessions;
+                } else {
+                    self.state.active_tab = Tab::Remote;
                 }
             }
             return;
