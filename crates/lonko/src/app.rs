@@ -359,13 +359,22 @@ impl App {
                     // Repeat select-pane for 300ms to beat tmux mouse-mode.
                     // Every MouseUp/MouseDown re-selects lonko; we overwrite it
                     // repeatedly until there are no more pending mouse events.
+                    //
+                    // The sentinel is rewritten before every iteration so
+                    // the follow script skips each `switch-client`-triggered
+                    // `client-session-changed` / `after-select-window` hook
+                    // firing. Without this, lonko gets killed and respawned
+                    // on the first hook, and remote agents disappear for
+                    // several seconds until bridges re-establish.
                     use std::sync::atomic::Ordering;
                     let my_gen = self.focus_gen.fetch_add(1, Ordering::SeqCst) + 1;
                     let gen_arc = self.focus_gen.clone();
+                    write_no_follow_sentinel();
                     tokio::spawn(async move {
                         for delay_ms in [30u64, 60, 100, 160, 240] {
                             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                             if gen_arc.load(Ordering::SeqCst) != my_gen { break; }
+                            write_no_follow_sentinel();
                             let _ = tmux::select_pane(&p);
                             let _ = tmux::focus_pane(&p);
                         }
