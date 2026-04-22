@@ -78,6 +78,28 @@ pub fn send_keys(pane_id: &str, keys: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Send keys to a tmux pane on a remote host over SSH.
+///
+/// Used when a permission response must reach the tmux server on the host
+/// where the Claude session actually lives (LONKO-49). The local `ssh`
+/// invocation builds the argv itself (no remote shell), which keeps
+/// pane IDs and key strings from being re-parsed by any shell.
+pub fn send_keys_remote(host: &str, pane_id: &str, keys: &str) -> anyhow::Result<()> {
+    let status = Command::new("ssh")
+        .args([
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=5",
+            host,
+            "tmux", "send-keys", "-t", pane_id, "-l", keys,
+        ])
+        .status()?;
+
+    if !status.success() {
+        anyhow::bail!("remote tmux send-keys failed on {host} for pane {pane_id}");
+    }
+    Ok(())
+}
+
 /// Find the tmux pane that owns (or is an ancestor of) the given PID.
 /// Queries `tmux list-panes -a` and walks the process tree upward.
 pub fn find_pane_for_pid(target_pid: u32) -> Option<String> {

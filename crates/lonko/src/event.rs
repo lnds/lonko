@@ -27,4 +27,12 @@ pub enum Event {
     /// The set of hostnames that were online during the latest Tailnet poll.
     /// Used to prune stale hosts that are no longer in the peer list.
     RemotePeersOnline(Vec<String>),
+    /// Result of a blocking `RemoteBridge::start` call for `host`. The
+    /// bridge is delivered on the success path so it can be inserted
+    /// into `App::remote_bridges` back on the main task; the string
+    /// carries the error message on failure.
+    RemoteBridgeStarted {
+        host: String,
+        result: Result<crate::sources::remote_bridge::RemoteBridge, String>,
+    },
 }

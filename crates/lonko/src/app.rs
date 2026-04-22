@@ -108,6 +108,13 @@ pub struct App {
     last_click: Option<(Tab, usize, std::time::Instant)>,
     /// Monotonic counter shared with pending focus tasks; increment to cancel stale spawns.
     focus_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// SSH reverse-tunnel bridges keyed by host. One child `ssh -N -R`
+    /// per online Tailnet host. Dropped on shutdown (see Drop impl on
+    /// `RemoteBridge`, which reaps the child).
+    remote_bridges: std::collections::HashMap<String, crate::sources::remote_bridge::RemoteBridge>,
+    /// Hosts with a bridge start currently in flight on a blocking task.
+    /// Prevents double-spawn while the task is pending.
+    remote_bridge_starting: std::collections::HashSet<String>,
 }
 
 impl App {
@@ -123,6 +130,8 @@ impl App {
             scan_tx: None,
             last_click: None,
             focus_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            remote_bridges: std::collections::HashMap::new(),
+            remote_bridge_starting: std::collections::HashSet::new(),
         }
     }
 
@@ -583,26 +592,41 @@ impl App {
     /// Send a permission response to the first session waiting for user approval.
     /// Targets the first `WaitingForUser` session regardless of selection, so the
     /// user can grant permission without navigating to that session first.
+    ///
+    /// For sessions originating on a remote host, the keystroke is delivered
+    /// via SSH to that host's tmux server (the pane ID would not resolve
+    /// against the local tmux).
     fn send_permission(&mut self, key: &str) {
         let waiting = self.state.sessions.iter().find(|s| s.status.is_waiting());
         let Some(session) = waiting else { return };
         let pid = session.pid;
         let session_id = session.id.clone();
-        let pane = session.tmux_pane.clone()
-            .or_else(|| tmux::find_pane_for_pid(pid));
+        let host = session.host.clone();
+        // For remote sessions there is no usable local PID, so we can only
+        // trust whatever pane ID the bridge already propagated.
+        let pane = if host.is_some() {
+            session.tmux_pane.clone()
+        } else {
+            session.tmux_pane.clone()
+                .or_else(|| tmux::find_pane_for_pid(pid))
+        };
         if let Some(ref p) = pane
             && let Some(s) = self.state.sessions.iter_mut().find(|s| s.id == session_id)
                 && s.tmux_pane.is_none() {
                     s.tmux_pane = Some(p.clone());
                 }
         let Some(pane) = pane else { return };
-        let _ = tmux::send_keys(&pane, key);
+        let result = match host.as_deref() {
+            Some(h) => tmux::send_keys_remote(h, &pane, key),
+            None    => tmux::send_keys(&pane, key),
+        };
+        if let Err(e) = result {
+            tracing::warn!("send_permission failed: {e}");
+        }
     }
 
     fn handle_hook(&mut self, payload: crate::sources::hooks::HookPayload) {
         if let Some(host) = payload.host.as_deref() {
-            // Until LONKO-50 promotes these to Agents cards, just log so we
-            // can see the bridge traffic during LONKO-49 development.
             tracing::debug!("hook from remote host '{host}' (event={:?})", payload.hook_event_name);
         }
 
@@ -711,6 +735,15 @@ impl App {
                     session.project_name = cwd.split('/').next_back().unwrap_or(cwd).to_string();
                 }
 
+        // Stamp the originating host so later operations (permission sends,
+        // worktree creation, kill) can route to the right tmux server.
+        // Only overwrite when the incoming payload asserts a host: a later
+        // local-only hook should not clobber a session that belongs to a
+        // remote machine.
+        if payload.host.is_some() {
+            session.host = payload.host.clone();
+        }
+
         session.last_activity = std::time::Instant::now();
 
         let event_name = payload.hook_event_name.as_deref().unwrap_or("");
@@ -793,6 +826,18 @@ impl App {
                     self.state.remote_selected = 0;
                 }
             }
+            Event::RemoteBridgeStarted { host, result } => {
+                self.remote_bridge_starting.remove(&host);
+                match result {
+                    Ok(bridge) => {
+                        tracing::info!("remote bridge to {host} ready");
+                        self.remote_bridges.insert(host, bridge);
+                    }
+                    Err(e) => {
+                        tracing::warn!("remote bridge to {host} failed: {e}");
+                    }
+                }
+            }
         }
         Ok(false)
     }
@@ -854,6 +899,14 @@ impl App {
             tmux_scanner::scan(tx, &known_panes, self.state.own_pane.as_deref());
         }
 
+        // Reconcile SSH reverse-tunnel bridges with the currently online
+        // Tailnet hosts every 2s. Independent from the Remote-tab poll
+        // rhythm: bridges must keep flowing even when the user is on
+        // the Agents tab.
+        if self.state.remote_enabled && self.state.tick.is_multiple_of(20) {
+            self.sync_remote_bridges();
+        }
+
         // Poll remote Tailnet hosts, only while the Remote tab is active.
         // Each host has its own next_poll_tick based on backoff; we check every tick.
         if self.state.active_tab == Tab::Remote
@@ -913,6 +966,58 @@ impl App {
                 }
 
                 let _ = tx.send(Event::RemotePeersOnline(online_names));
+            });
+        }
+    }
+
+    /// Reconcile `remote_bridges` with the set of hosts that are currently
+    /// Online and not excluded. Starts a bridge for each host that needs
+    /// one; drops bridges whose host fell off the list or whose SSH child
+    /// has exited. Start attempts run on a blocking task so the short
+    /// preparatory SSH probe does not stall the UI; the resulting
+    /// `RemoteBridge` arrives via `Event::RemoteBridgeStarted`.
+    fn sync_remote_bridges(&mut self) {
+        let Some(ref tx) = self.scan_tx else { return };
+
+        // Desired set: online hosts that are not excluded.
+        let desired: std::collections::HashSet<String> = self
+            .state
+            .remote_hosts
+            .iter()
+            .filter(|h| matches!(h.status, crate::state::HostStatus::Online))
+            .filter(|h| !self.state.excluded_hosts.contains(&h.hostname))
+            .map(|h| h.hostname.clone())
+            .collect();
+
+        // Drop bridges for hosts that should no longer have one, and
+        // reap any bridge whose SSH child has exited (so we retry next
+        // cycle with a fresh spawn).
+        self.remote_bridges.retain(|host, bridge| {
+            if !desired.contains(host) {
+                tracing::info!("tearing down remote bridge to {host} (not online)");
+                return false;
+            }
+            if !bridge.is_alive() {
+                tracing::warn!("remote bridge to {host} exited; will retry");
+                return false;
+            }
+            true
+        });
+
+        // Start bridges for desired hosts that don't have one yet, unless
+        // a start task is already in flight.
+        for host in desired {
+            if self.remote_bridges.contains_key(&host)
+                || self.remote_bridge_starting.contains(&host)
+            {
+                continue;
+            }
+            self.remote_bridge_starting.insert(host.clone());
+            let tx = tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let result = crate::sources::remote_bridge::RemoteBridge::start(&host)
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(Event::RemoteBridgeStarted { host, result });
             });
         }
     }

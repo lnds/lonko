@@ -86,6 +86,11 @@ pub struct Session {
     /// Populated by callers via `worktree::repo_common_root` — left `None`
     /// for non-git cwds. Used to group the agents list in the UI.
     pub repo_root: Option<String>,
+    /// Tailnet host this session lives on. `None` for local sessions;
+    /// `Some(hostname)` when the session was discovered through a remote
+    /// hook event stamped by `lonko-hook --remote-tag` (LONKO-48). Drives
+    /// SSH-routing of operations that target the session's tmux pane.
+    pub host: Option<String>,
 }
 
 /// Trunk branches that should float to the top of their repo group in the
@@ -146,6 +151,7 @@ impl Session {
             parent_id: None,
             depth: 0,
             repo_root: None,
+            host: None,
         }
     }
 
