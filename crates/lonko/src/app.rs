@@ -81,26 +81,33 @@ pub fn hook_event_to_status(
 }
 
 /// Send a desktop notification when a session needs attention.
-/// Spawn a new local tmux window that SSHs into `host` and attaches to
-/// the remote tmux session containing `pane_id`. Resolution happens on
-/// the remote side via a single `tmux display-message` — one round-trip,
-/// nothing to serialize locally. The pane id is defensively single-quote
-/// escaped before it hits the remote shell.
+/// Open the remote tmux session containing `pane_id` as its own local
+/// tmux session (so it sits alongside the other top-level sessions
+/// instead of being tucked inside whatever window lonko happens to be
+/// in). Resolution of the actual remote session name happens on the
+/// remote via a single `tmux display-message` command substitution,
+/// so no extra round-trip before spawning.
 ///
-/// The new window's name is `host:pane_id` (without the leading `%`) so
-/// it is easy to spot in `prefix + w` and to tear down if needed.
+/// The local session name is `<host>@<pane#>`: `@` rather than `:`
+/// avoids tmux's `session:window` target syntax, and stripping the
+/// leading `%` from the pane id keeps the name shell-safe.
 pub fn attach_remote_agent(host: &str, pane_id: &str) {
     let pane_escaped = pane_id.replace('\'', "'\\''");
     let remote_cmd = format!(
         "exec tmux attach-session -t \"$(tmux display-message -p -F '#{{session_name}}' -t '{}')\"",
         pane_escaped,
     );
-    let win_name = format!("{}:{}", host, pane_id.trim_start_matches('%'));
+    let session_name = format!("{}@{}", host, pane_id.trim_start_matches('%'));
+    // new-session -d creates the session detached so that from inside an
+    // existing tmux client we can then `switch-client` into it.
     let _ = std::process::Command::new("tmux")
         .args([
-            "new-window", "-n", &win_name, "--",
+            "new-session", "-d", "-s", &session_name, "--",
             "ssh", host, "-t", &remote_cmd,
         ])
+        .status();
+    let _ = std::process::Command::new("tmux")
+        .args(["switch-client", "-t", &session_name])
         .status();
 }
 
@@ -517,18 +524,25 @@ impl App {
         crate::config::save_excluded_hosts(&self.state.excluded_hosts);
     }
 
-    /// Open a new tmux window that SSH-attaches to the selected remote session.
-    /// The local side passes arguments directly (no shell). The remote command
-    /// single-quote-escapes the session name to prevent injection on the remote
-    /// shell (`'` → `'\''`).
+    /// Open a new local tmux session that SSH-attaches to the selected
+    /// remote tmux session. The local side passes arguments directly
+    /// (no shell). The remote command single-quote-escapes the session
+    /// name to prevent injection on the remote shell (`'` → `'\''`).
+    ///
+    /// A top-level local session (rather than a nested window) keeps
+    /// remote attachments at the same hierarchy as local work.
     fn attach_remote_session(&self) {
         let Some((host, session_name)) = self.state.selected_remote_session() else { return };
-        let win_name = format!("{}:{}", host, session_name);
+        // `@` instead of `:` avoids tmux's `session:window` target syntax.
+        let local_name = format!("{}@{}", host, session_name);
         let escaped = session_name.replace('\'', "'\\''");
         let attach_cmd = format!("tmux attach-session -t '{}'", escaped);
         let _ = std::process::Command::new("tmux")
-            .args(["new-window", "-n", &win_name, "--",
+            .args(["new-session", "-d", "-s", &local_name, "--",
                    "ssh", host, "-t", &attach_cmd])
+            .status();
+        let _ = std::process::Command::new("tmux")
+            .args(["switch-client", "-t", &local_name])
             .status();
     }
 
