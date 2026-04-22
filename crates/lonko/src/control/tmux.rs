@@ -97,9 +97,11 @@ pub fn send_keys_remote(host: &str, pane_id: &str, keys: &str) -> anyhow::Result
         .args([
             "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=5",
+            "-o", "LogLevel=ERROR",
             host,
             "tmux", "send-keys", "-t", pane_id, "-l", keys,
         ])
+        .stderr(Stdio::null())
         .status()?;
 
     if !status.success() {

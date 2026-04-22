@@ -40,6 +40,7 @@ pub fn poll_host(host: &str) -> Result<RemoteSnapshot> {
         .args([
             "-o", "ConnectTimeout=5",
             "-o", "BatchMode=yes",
+            "-o", "LogLevel=ERROR",
             host,
             script,
         ])

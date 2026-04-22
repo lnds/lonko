@@ -50,6 +50,7 @@ impl RemoteBridge {
             .args([
                 "-N",
                 "-o", "BatchMode=yes",
+                "-o", "LogLevel=ERROR",
                 "-o", "ServerAliveInterval=30",
                 "-o", "ServerAliveCountMax=2",
                 "-o", "ExitOnForwardFailure=yes",
@@ -103,14 +104,21 @@ impl Drop for RemoteBridge {
 /// Remove a stale socket on the remote side, if any. Swallows failures —
 /// a successful `rm -f` on a non-existent path is fine, and if the
 /// remote is unreachable the subsequent `ssh -R` will surface that.
+///
+/// Stdout/stderr are discarded so ssh's informational warnings
+/// (post-quantum key-exchange notice in OpenSSH 10.x) do not bleed
+/// onto the TUI's alternate screen.
 fn unlink_remote(host: &str, remote_path: &str) -> Result<()> {
     let _ = Command::new("ssh")
         .args([
             "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=5",
+            "-o", "LogLevel=ERROR",
             host,
             "rm", "-f", remote_path,
         ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status();
     Ok(())
 }
@@ -122,6 +130,7 @@ fn query_remote_user(host: &str) -> Result<String> {
         .args([
             "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=5",
+            "-o", "LogLevel=ERROR",
             host,
             "printf", "%s", "$USER",
         ])
