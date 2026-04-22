@@ -37,6 +37,12 @@ impl RemoteBridge {
         let local_sock = claude::socket_path();
         let forward = format!("{}:{}", remote_bind, local_sock.display());
 
+        // `StreamLocalBindUnlink=yes` is a client-side hint; it does not
+        // reach sshd, so a stale socket left by a crashed previous bridge
+        // will block the new bind. Remove it preemptively over a one-shot
+        // SSH call before asking sshd to listen there.
+        unlink_remote(host, &remote_bind)?;
+
         // `StreamLocalBindUnlink=yes` is the sshd-side cleanup of a stale
         // bound socket — without it, a crashed previous bridge leaves the
         // path dangling and the new bridge fails with "cannot bind".
@@ -92,6 +98,21 @@ impl Drop for RemoteBridge {
         self.shutdown();
         tracing::info!("remote bridge to {} dropped", self.host);
     }
+}
+
+/// Remove a stale socket on the remote side, if any. Swallows failures —
+/// a successful `rm -f` on a non-existent path is fine, and if the
+/// remote is unreachable the subsequent `ssh -R` will surface that.
+fn unlink_remote(host: &str, remote_path: &str) -> Result<()> {
+    let _ = Command::new("ssh")
+        .args([
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=5",
+            host,
+            "rm", "-f", remote_path,
+        ])
+        .status();
+    Ok(())
 }
 
 /// Resolve the remote user's login name. Needed to build the `/tmp`
