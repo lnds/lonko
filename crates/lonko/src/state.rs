@@ -249,12 +249,21 @@ impl Session {
     }
 }
 
+/// `$HOME/.cache` — matches what the tmux helper scripts
+/// (`lonko-follow.sh`, `lonko-panel.sh`) hardcode. `dirs::cache_dir()`
+/// diverges on macOS (`~/Library/Caches`), which broke the
+/// `lonko-no-follow` sentinel handshake when lonko and the shell
+/// scripts disagreed on the path. Keep this one source of truth.
+pub fn lonko_cache_dir() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join(".cache")
+}
+
 // ── Bookmark persistence ──────────────────────────────────────────────────────
 
 fn bookmarks_path() -> std::path::PathBuf {
-    dirs::cache_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("lonko-bookmarks.json")
+    lonko_cache_dir().join("lonko-bookmarks.json")
 }
 
 pub fn load_bookmarks() -> HashMap<String, String> {

@@ -68,9 +68,7 @@ async fn main() -> Result<()> {
     // `LONKO_LOG=debug`) and defaults to `info`. The log file is kept in
     // the OS cache dir to avoid polluting $HOME. Creation failures are
     // swallowed — a lonko without logs still works.
-    let log_path = dirs::cache_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("lonko.log");
+    let log_path = state::lonko_cache_dir().join("lonko.log");
     if let Some(parent) = log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

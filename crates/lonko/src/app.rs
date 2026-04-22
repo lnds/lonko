@@ -20,9 +20,13 @@ use crate::{
 
 /// Write the no-follow sentinel so lonko-follow.sh skips the next hook trigger.
 pub fn write_no_follow_sentinel() {
-    let sentinel = dirs::cache_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("lonko-no-follow");
+    let sentinel = crate::state::lonko_cache_dir().join("lonko-no-follow");
+    // Ensure the cache dir exists — on a fresh install it may not,
+    // and a silent write failure here means the follow script never
+    // sees the sentinel and kills lonko on every switch-client.
+    if let Some(parent) = sentinel.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let _ = std::fs::write(&sentinel, "");
 }
 
@@ -1888,9 +1892,7 @@ impl App {
             .enumerate()
             .map(|(i, s)| format!("{}\t{}\t{}\n", i + 1, s.display_name(), s.cwd))
             .collect();
-        let info_path = dirs::cache_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-            .join("lonko-sessions-info");
+        let info_path = crate::state::lonko_cache_dir().join("lonko-sessions-info");
         let _ = std::fs::write(info_path, info_content);
     }
 
@@ -2069,9 +2071,7 @@ mod tests {
 
     #[test]
     fn sentinel_file_is_created() {
-        let sentinel = dirs::cache_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-            .join("lonko-no-follow");
+        let sentinel = crate::state::lonko_cache_dir().join("lonko-no-follow");
         let _ = std::fs::remove_file(&sentinel);
 
         write_no_follow_sentinel();

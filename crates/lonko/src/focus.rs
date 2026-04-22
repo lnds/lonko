@@ -6,9 +6,7 @@
 use std::process::Command;
 
 fn sessions_cache_path() -> std::path::PathBuf {
-    dirs::cache_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("lonko-sessions")
+    crate::state::lonko_cache_dir().join("lonko-sessions")
 }
 
 fn tmux_msg(msg: &str) {
