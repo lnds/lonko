@@ -81,6 +81,29 @@ pub fn hook_event_to_status(
 }
 
 /// Send a desktop notification when a session needs attention.
+/// Spawn a new local tmux window that SSHs into `host` and attaches to
+/// the remote tmux session containing `pane_id`. Resolution happens on
+/// the remote side via a single `tmux display-message` — one round-trip,
+/// nothing to serialize locally. The pane id is defensively single-quote
+/// escaped before it hits the remote shell.
+///
+/// The new window's name is `host:pane_id` (without the leading `%`) so
+/// it is easy to spot in `prefix + w` and to tear down if needed.
+pub fn attach_remote_agent(host: &str, pane_id: &str) {
+    let pane_escaped = pane_id.replace('\'', "'\\''");
+    let remote_cmd = format!(
+        "exec tmux attach-session -t \"$(tmux display-message -p -F '#{{session_name}}' -t '{}')\"",
+        pane_escaped,
+    );
+    let win_name = format!("{}:{}", host, pane_id.trim_start_matches('%'));
+    let _ = std::process::Command::new("tmux")
+        .args([
+            "new-window", "-n", &win_name, "--",
+            "ssh", host, "-t", &remote_cmd,
+        ])
+        .status();
+}
+
 pub fn notify_if_needed(project_name: &str, status: &SessionStatus) {
     let (summary, body) = match status {
         SessionStatus::WaitingForUser(msg) => {
@@ -316,13 +339,12 @@ impl App {
             self.state.selected = global_idx;
             let session = self.state.selected_session().cloned();
             if let Some(session) = session {
-                // Remote sessions cannot be focused through the local tmux
-                // server — their pane IDs belong to another host. Doing
-                // nothing is the right answer until LONKO-51 routes attach
-                // over SSH. (Attaching from the Remote tab is the current
-                // escape hatch: it spawns a new-window `ssh -t host tmux
-                // attach`.)
-                if session.host.is_some() {
+                // Remote agent: route attach through SSH (same behavior
+                // as Enter), then bail out of the local focus-retry loop.
+                if let Some(host) = session.host.as_deref() {
+                    if let Some(pane) = session.tmux_pane.as_deref() {
+                        attach_remote_agent(host, pane);
+                    }
                     return;
                 }
                 let pid = session.pid;
@@ -567,10 +589,13 @@ impl App {
 
     fn focus_selected(&mut self) {
         let Some(session) = self.state.selected_session() else { return };
-        // Remote sessions live on another tmux server; focusing them
-        // locally is both meaningless and noisy (tmux "can't find pane").
-        // LONKO-51 will replace this no-op with an SSH attach.
-        if session.host.is_some() {
+        // Remote agent: open a new tmux window that SSH-attaches to the
+        // remote tmux session containing this pane. Falls back to a no-op
+        // when we don't yet know the pane (hook hasn't landed).
+        if let Some(host) = session.host.as_deref() {
+            if let Some(pane) = session.tmux_pane.as_deref() {
+                attach_remote_agent(host, pane);
+            }
             return;
         }
         let pid = session.pid;
