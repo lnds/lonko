@@ -94,6 +94,19 @@ fn is_trunk_branch(branch: Option<&str>) -> bool {
     matches!(branch, Some("main") | Some("master"))
 }
 
+/// Composite ordering key used within a repo group. Trunk floats first,
+/// then branch name, then cwd, then tmux pane as a unique last resort.
+/// Returning owned strings keeps the key self-contained so `sort_by` can
+/// compare without lifetime gymnastics.
+fn group_sort_key(s: &Session) -> (bool, String, String, String) {
+    (
+        !is_trunk_branch(s.branch.as_deref()),
+        s.branch.as_deref().unwrap_or("").to_ascii_lowercase(),
+        s.cwd.clone(),
+        s.tmux_pane.clone().unwrap_or_default(),
+    )
+}
+
 /// Return the context window size for a given model ID.
 /// Falls back to 200_000 for unknown models.
 pub fn context_max_for_model(model: &str) -> u32 {
@@ -543,11 +556,13 @@ impl AppState {
             named.push((None, ungrouped));
         }
 
-        // Within each group, float trunk branches (`main`, `master`) to the
-        // top so the canonical checkout sits above worktree branches.
-        // Stable sort preserves insertion order between ties.
+        // Within each group, order by a stable composite key so the list
+        // does not shuffle as hooks arrive or transcripts get re-read.
+        // Priority: trunk first, then branch name (case-insensitive),
+        // then cwd, then tmux pane as a unique fallback for cases where
+        // two agents share the same worktree and branch.
         for (_, group_mains) in named.iter_mut() {
-            group_mains.sort_by_key(|s| if is_trunk_branch(s.branch.as_deref()) { 0 } else { 1 });
+            group_mains.sort_by_key(|s| group_sort_key(s));
         }
 
         let mut result: Vec<&Session> = Vec::with_capacity(mains.len());
@@ -1151,20 +1166,71 @@ mod tests {
     }
 
     #[test]
-    fn visible_sessions_trunk_sort_is_stable_for_ties() {
+    fn visible_sessions_orders_non_trunk_alphabetically_by_branch() {
         let mut state = AppState::default();
+        // Insert in reverse-alphabetical branch order to prove the sort
+        // drives the final position rather than insertion order.
         state.sessions = vec![
+            main_with_repo_branch("feat3", "/r/alpha", "feat-c"),
             main_with_repo_branch("feat1", "/r/alpha", "feat-a"),
             main_with_repo_branch("feat2", "/r/alpha", "feat-b"),
-            main_with_repo_branch("feat3", "/r/alpha", "feat-c"),
         ];
         let ids: Vec<&str> = state
             .visible_sessions()
             .iter()
             .map(|s| s.id.as_str())
             .collect();
-        // No trunk present: insertion order preserved.
         assert_eq!(ids, vec!["feat1", "feat2", "feat3"]);
+    }
+
+    #[test]
+    fn visible_sessions_tie_breaks_by_cwd_then_pane() {
+        let mut state = AppState::default();
+        // Two agents in the same worktree on the same branch — pane ID
+        // is the final, unique tie-breaker so the order never flips.
+        let mut a = main_with_repo_branch("a", "/r/alpha", "feat");
+        a.cwd = "/tmp/alpha".into();
+        a.tmux_pane = Some("%20".into());
+        let mut b = main_with_repo_branch("b", "/r/alpha", "feat");
+        b.cwd = "/tmp/alpha".into();
+        b.tmux_pane = Some("%10".into());
+        // Insert in the "wrong" order to prove the composite key wins.
+        state.sessions = vec![a, b];
+        let ids: Vec<&str> = state
+            .visible_sessions()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["b", "a"]);
+    }
+
+    #[test]
+    fn visible_sessions_order_survives_branch_flip() {
+        let mut state = AppState::default();
+        // Simulate a transcript re-read swapping two worktrees' branch
+        // labels: with the old insertion-order sort, the positions would
+        // shuffle; with the composite key, the alphabetical branch order
+        // alone determines the outcome.
+        state.sessions = vec![
+            main_with_repo_branch("x", "/r/alpha", "feat-z"),
+            main_with_repo_branch("y", "/r/alpha", "feat-a"),
+        ];
+        let ids: Vec<&str> = state
+            .visible_sessions()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["y", "x"]);
+
+        // Flip the branches and confirm the order follows the new labels.
+        state.sessions[0].branch = Some("feat-a".into());
+        state.sessions[1].branch = Some("feat-z".into());
+        let ids: Vec<&str> = state
+            .visible_sessions()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["x", "y"]);
     }
 
     #[test]
