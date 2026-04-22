@@ -757,12 +757,23 @@ impl App {
 
     fn handle_hook(&mut self, payload: crate::sources::hooks::HookPayload) {
         if let Some(host) = payload.host.as_deref() {
-            tracing::debug!("hook from remote host '{host}' (event={:?})", payload.hook_event_name);
+            tracing::info!(
+                "remote hook host={host} event={:?} session={:?} tmux_pane={:?} cwd={:?}",
+                payload.hook_event_name,
+                payload.session_id,
+                payload.tmux_pane,
+                payload.cwd,
+            );
         }
 
         let parent_session_id = match &payload.session_id {
             Some(id) => id.clone(),
-            None => return,
+            None => {
+                if payload.host.is_some() {
+                    tracing::warn!("remote hook dropped: no session_id");
+                }
+                return;
+            }
         };
 
         // Detect subagent: has a non-empty agent_type and agent_id

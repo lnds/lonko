@@ -63,6 +63,32 @@ async fn main() -> Result<()> {
             _ => None,
         });
 
+    // File-backed tracing so debug lines from the bridge, hook handler,
+    // etc. go somewhere observable. Respects `LONKO_LOG` (e.g.
+    // `LONKO_LOG=debug`) and defaults to `info`. The log file is kept in
+    // the OS cache dir to avoid polluting $HOME. Creation failures are
+    // swallowed — a lonko without logs still works.
+    let log_path = dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("lonko.log");
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        use tracing_subscriber::{fmt, EnvFilter};
+        let filter = EnvFilter::try_from_env("LONKO_LOG")
+            .unwrap_or_else(|_| EnvFilter::new("info"));
+        let _ = fmt()
+            .with_writer(std::sync::Mutex::new(file))
+            .with_ansi(false)
+            .with_env_filter(filter)
+            .try_init();
+    }
+
     let mut terminal = ratatui::init();
     crossterm::execute!(
         std::io::stdout(),
