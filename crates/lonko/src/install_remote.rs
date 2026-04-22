@@ -108,8 +108,14 @@ fn remote_cargo_version(host: &str) -> Result<String> {
 /// format. Streams cargo's output to the user so a long build doesn't look
 /// like a hang.
 fn install_hook_binary(host: &str, version: &str) -> Result<()> {
+    // `net.git-fetch-with-cli=true` makes cargo shell out to git for the clone,
+    // so it honors the remote user's ssh-agent, credential helpers, and any
+    // `insteadOf` rewrites. Without it, cargo's built-in libgit2 client chokes
+    // when the user has `url."git@github.com:".insteadOf = "https://github.com/"`
+    // configured (a very common setup).
     let remote_cmd = format!(
-        "cargo install --git {REPO_URL} --tag v{version} --locked lonko-hook"
+        "cargo install --config net.git-fetch-with-cli=true \
+         --git {REPO_URL} --tag v{version} --locked lonko-hook"
     );
     let status = Command::new("ssh")
         .args([host, &remote_cmd])
