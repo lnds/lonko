@@ -80,6 +80,34 @@ pub fn save_excluded_hosts(excluded: &HashSet<String>) {
     }
 }
 
+// ── Remote enabled runtime override ──────────────────────────────────────────
+// A separate file so the UI toggle (LONKO-52) can persist across restarts
+// without touching config.toml. When the file exists its value wins over
+// config.toml's `[remote] enabled`; missing file means "use config default".
+
+fn remote_enabled_override_path() -> PathBuf {
+    config_dir().join("remote-enabled")
+}
+
+pub fn load_remote_enabled_override() -> Option<bool> {
+    std::fs::read_to_string(remote_enabled_override_path())
+        .ok()
+        .and_then(|s| match s.trim() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        })
+}
+
+pub fn save_remote_enabled_override(enabled: bool) {
+    let dir = config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(
+        remote_enabled_override_path(),
+        if enabled { "true" } else { "false" },
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

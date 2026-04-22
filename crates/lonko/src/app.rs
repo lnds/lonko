@@ -209,7 +209,11 @@ impl App {
         let mut state = AppState::default();
         state.bookmarks = crate::state::load_bookmarks();
         let config = crate::config::load();
-        state.remote_enabled = config.remote.enabled;
+        // UI toggle (LONKO-52) lives in its own file and wins over
+        // config.toml so the user's last choice survives restart without
+        // rewriting their config.
+        state.remote_enabled = crate::config::load_remote_enabled_override()
+            .unwrap_or(config.remote.enabled);
         state.remote_poll_ticks = config.remote.poll_interval_secs.max(1) * 10;
         state.excluded_hosts = crate::config::load_excluded_hosts();
         Self {
@@ -1139,6 +1143,51 @@ impl App {
     /// blocking task so the short preparatory SSH probe does not stall
     /// the UI; the resulting `RemoteBridge` arrives via
     /// `Event::RemoteBridgeStarted`.
+    /// Flip remote support on/off at runtime. When disabling, every
+    /// remote-only artifact is torn down immediately: bridges killed,
+    /// provisional remote agents dropped from the Agents list, the
+    /// Remote tab's host cache cleared, and the user bounced off the
+    /// Remote tab if they happened to be on it. When enabling, the
+    /// next on_tick discovery round wires everything back up.
+    ///
+    /// The choice persists across restarts via a small text file
+    /// (`~/.config/lonko/remote-enabled`) that overrides the static
+    /// config.toml value, so a user who toggles off on kayshon while
+    /// their config says `enabled = true` stays off on reboot.
+    fn toggle_remote_support(&mut self) {
+        let new_enabled = !self.state.remote_enabled;
+        self.state.remote_enabled = new_enabled;
+        crate::config::save_remote_enabled_override(new_enabled);
+
+        if new_enabled {
+            tracing::info!("remote support enabled (runtime toggle)");
+            return;
+        }
+
+        tracing::info!("remote support disabled (runtime toggle)");
+
+        // Kill all bridges; the map's Drop impls reap the ssh children.
+        self.remote_bridges.clear();
+        self.remote_bridge_starting.clear();
+
+        // Drop the Tailnet caches and Remote-tab host list.
+        self.remote_online_hosts.clear();
+        self.state.remote_hosts.clear();
+        self.state.remote_selected = 0;
+
+        // Remove every session that belongs to a remote host — both
+        // `remote:` provisionals and hook-promoted real sessions.
+        // Without this the Agents list would keep showing stale cards
+        // for hosts we're no longer polling.
+        self.state.sessions.retain(|s| s.host.is_none());
+        let len = self.state.visible_len();
+        self.state.selected = if len == 0 { 0 } else { self.state.selected.min(len - 1) };
+
+        if self.state.active_tab == Tab::Remote {
+            self.state.active_tab = Tab::Agents;
+        }
+    }
+
     fn sync_remote_bridges(&mut self) {
         let Some(ref tx) = self.scan_tx else { return };
 
@@ -1500,7 +1549,10 @@ impl App {
                 self.state.tmux_window_cursor = None;
                 self.state.tmux_expanded = false;
             }
-            KeyCode::Char('r' | 'R') if self.state.remote_enabled => {
+            KeyCode::Char('R') => {
+                self.toggle_remote_support();
+            }
+            KeyCode::Char('r') if self.state.remote_enabled => {
                 self.state.active_tab = Tab::Remote;
                 self.state.tmux_window_cursor = None;
                 self.state.tmux_expanded = false;

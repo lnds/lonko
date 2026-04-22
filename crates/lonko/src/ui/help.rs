@@ -39,6 +39,8 @@ pub fn render(frame: &mut Frame) {
         key_line("Tab", "Switch tab"),
         key_line("a", "Agents tab"),
         key_line("s", "Sessions tab"),
+        key_line("r", "Remote tab"),
+        key_line("R", "Toggle remote support"),
         key_line("Enter", "Focus session"),
         key_line("Space", "Collapse/expand group"),
         key_line("1-9", "Jump to nth"),
