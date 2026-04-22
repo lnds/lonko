@@ -6,11 +6,20 @@
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 
-fn socket_path() -> std::path::PathBuf {
+/// Unix socket lonko-hook writes to.
+///
+/// Local invocations use `~/.claude/lonko.sock` — the same socket the local
+/// `lonko` TUI listens on. When `--remote-tag` is set, we switch to
+/// `~/.claude/lonko-bridge.sock`, which the SSH reverse tunnel (LONKO-49)
+/// forwards to the operator's local `lonko`. The two-path split keeps the
+/// invariant that the unsuffixed socket belongs to *this* machine's lonko,
+/// even on hosts where someone also runs lonko locally.
+fn socket_path(remote: bool) -> std::path::PathBuf {
+    let name = if remote { "lonko-bridge.sock" } else { "lonko.sock" };
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
         .join(".claude")
-        .join("lonko.sock")
+        .join(name)
 }
 
 fn log_path() -> std::path::PathBuf {
@@ -30,8 +39,8 @@ fn log(msg: &str) {
     }
 }
 
-fn try_send(payload: &str) -> bool {
-    let sock = socket_path();
+fn try_send(payload: &str, remote: bool) -> bool {
+    let sock = socket_path(remote);
     match UnixStream::connect(&sock) {
         Ok(mut stream) => {
             let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(200)));
@@ -128,7 +137,7 @@ fn main() -> anyhow::Result<()> {
     let enriched = serde_json::to_string(&event)?;
 
     // Try to forward to lonko socket
-    if try_send(&enriched) {
+    if try_send(&enriched, remote_tag.is_some()) {
         return Ok(());
     }
 
@@ -150,7 +159,7 @@ fn main() -> anyhow::Result<()> {
         // Wait for lonko to start, then retry a few times
         for delay_ms in [200, 400, 600, 800] {
             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-            if try_send(&enriched) {
+            if try_send(&enriched, remote_tag.is_some()) {
                 return Ok(());
             }
         }
