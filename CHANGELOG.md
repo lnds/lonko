@@ -1,3 +1,21 @@
+## v0.16.0 (2026-04-22)
+
+### Feat
+
+- **remote**: Shift+R toggles remote support at runtime (LONKO-52)
+- **remote**: pre-populate idle remote agents via tmux polling
+- **logs**: file-backed tracing + explicit remote-hook logging
+- **remote**: reuse remote/<host> tmux session for attach
+- **remote**: open remote attach as a top-level tmux session
+- **remote**: attach to remote agent on Enter / double-click
+
+### Fix
+
+- **remote**: honor the no-follow sentinel on macOS
+- **remote**: lowercase Tailnet hostnames to match hook --remote-tag
+- **remote**: keep remote agents visible across attach + speed up first bridge
+- **follow**: suppress lonko-follow on Agents-tab double-click focus
+
 ## v0.15.0 (2026-04-22)
 
 ### Feat
