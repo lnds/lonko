@@ -23,10 +23,13 @@ if [ -f "$SENTINEL" ]; then
     exit 0
 fi
 
-# Skip follow for floating popups and lonko-tray (internal sessions)
+# Skip follow for floating popups, lonko-tray (internal sessions), and
+# remote/* wrapper sessions. The remote wrappers already contain an ssh
+# attach to a host that has its own lonko, so moving the local lonko in
+# too ends with two panels visible in the same window (LONKO-53).
 CURRENT_SESSION=$(tmux display-message -p '#{session_name}')
 case "$CURRENT_SESSION" in
-    floating-*|lonko-tray) exit 0 ;;
+    floating-*|lonko-tray|remote/*) exit 0 ;;
 esac
 
 LONKO_PANE=$(tmux list-panes -aF "#{pane_id} #{pane_current_command}" \
