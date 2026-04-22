@@ -600,6 +600,12 @@ impl App {
     }
 
     fn handle_hook(&mut self, payload: crate::sources::hooks::HookPayload) {
+        if let Some(host) = payload.host.as_deref() {
+            // Until LONKO-50 promotes these to Agents cards, just log so we
+            // can see the bridge traffic during LONKO-49 development.
+            tracing::debug!("hook from remote host '{host}' (event={:?})", payload.hook_event_name);
+        }
+
         let parent_session_id = match &payload.session_id {
             Some(id) => id.clone(),
             None => return,
@@ -1555,6 +1561,7 @@ mod tests {
             message: None,
             notification_type: None,
             tmux_pane: None,
+            host: None,
             agent_id: None,
             agent_type: None,
             agent_transcript_path: None,

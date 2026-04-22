@@ -61,7 +61,39 @@ fn open_panel() {
         .spawn();
 }
 
+/// Pull `--remote-tag <HOST>` out of argv. Unknown flags and trailing
+/// arguments are silently ignored to keep the hook forward-compatible.
+///
+/// The host ends up as `"host": "<HOST>"` in the forwarded JSON, so the
+/// local lonko can tell remote events apart from local ones and route
+/// them to the right agent card (see LONKO-49/50).
+fn parse_remote_tag(args: &[String]) -> Option<String> {
+    let mut iter = args.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--remote-tag" => {
+                if let Some(host) = iter.next()
+                    && !host.is_empty()
+                {
+                    return Some(host.clone());
+                }
+            }
+            s if s.starts_with("--remote-tag=") => {
+                let host = &s["--remote-tag=".len()..];
+                if !host.is_empty() {
+                    return Some(host.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let remote_tag = parse_remote_tag(&args);
+
     // Read the hook event JSON from stdin
     let mut payload = String::new();
     io::stdin().read_to_string(&mut payload)?;
@@ -88,12 +120,23 @@ fn main() -> anyhow::Result<()> {
         if !tmux.is_empty() {
             obj.insert("tmux".into(), serde_json::Value::String(tmux));
         }
+        if let Some(host) = &remote_tag {
+            obj.insert("host".into(), serde_json::Value::String(host.clone()));
+        }
     }
 
     let enriched = serde_json::to_string(&event)?;
 
     // Try to forward to lonko socket
     if try_send(&enriched) {
+        return Ok(());
+    }
+
+    // On a remote host the local socket is the one forwarded via SSH
+    // reverse tunnel; there is no panel here to open, and retrying
+    // just delays the hook. Log and exit.
+    if remote_tag.is_some() {
+        log("lonko socket not reachable on remote host (bridge down?)");
         return Ok(());
     }
 
@@ -117,4 +160,60 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(raw: &[&str]) -> Vec<String> {
+        std::iter::once("lonko-hook")
+            .chain(raw.iter().copied())
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn missing_flag_returns_none() {
+        assert_eq!(parse_remote_tag(&args(&[])), None);
+        assert_eq!(parse_remote_tag(&args(&["--unrelated", "foo"])), None);
+    }
+
+    #[test]
+    fn space_separated_flag() {
+        assert_eq!(
+            parse_remote_tag(&args(&["--remote-tag", "kayshon"])),
+            Some("kayshon".to_string())
+        );
+    }
+
+    #[test]
+    fn equals_form() {
+        assert_eq!(
+            parse_remote_tag(&args(&["--remote-tag=kayshon"])),
+            Some("kayshon".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_value_treated_as_missing() {
+        assert_eq!(parse_remote_tag(&args(&["--remote-tag", ""])), None);
+        assert_eq!(parse_remote_tag(&args(&["--remote-tag="])), None);
+    }
+
+    #[test]
+    fn flag_after_unknown_args_still_parsed() {
+        assert_eq!(
+            parse_remote_tag(&args(&["--future-flag", "x", "--remote-tag", "h1"])),
+            Some("h1".to_string())
+        );
+    }
+
+    #[test]
+    fn first_occurrence_wins() {
+        assert_eq!(
+            parse_remote_tag(&args(&["--remote-tag", "a", "--remote-tag", "b"])),
+            Some("a".to_string())
+        );
+    }
 }

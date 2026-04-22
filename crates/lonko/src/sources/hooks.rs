@@ -30,6 +30,10 @@ pub struct HookPayload {
     pub notification_type: Option<String>,
     // Enriched by lonko-hook
     pub tmux_pane: Option<String>,
+    // Set by `lonko-hook --remote-tag <HOST>` on remote hosts. `None` for
+    // local events. Consumed downstream once remote agents are promoted
+    // to the Agents tab (LONKO-50).
+    pub host: Option<String>,
     // Subagent fields (present when hook fires from a subagent context)
     pub agent_id: Option<String>,
     pub agent_type: Option<String>,
@@ -94,4 +98,33 @@ fn parse_permission_command(line: &str) -> Option<String> {
         return None;
     }
     claude::permission_key_to_stdin(parts.next()?.trim()).map(|s| s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payload_without_host_parses() {
+        let json = r#"{
+            "hook_event_name": "SessionStart",
+            "session_id": "abc",
+            "tmux_pane": "%1"
+        }"#;
+        let p: HookPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(p.session_id.as_deref(), Some("abc"));
+        assert_eq!(p.host, None);
+    }
+
+    #[test]
+    fn payload_with_host_parses() {
+        let json = r#"{
+            "hook_event_name": "SessionStart",
+            "session_id": "abc",
+            "tmux_pane": "%1",
+            "host": "kayshon"
+        }"#;
+        let p: HookPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(p.host.as_deref(), Some("kayshon"));
+    }
 }
