@@ -5,6 +5,7 @@ mod control;
 mod event;
 mod focus;
 mod install;
+mod install_remote;
 mod respond;
 mod sources;
 mod state;
@@ -34,6 +35,14 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
         return respond::run(key).map_err(|e| color_eyre::eyre::eyre!(e));
+    }
+    if args.get(1).map(|s| s.as_str()) == Some("install-remote") {
+        let host = args.get(2).map(|s| s.as_str()).unwrap_or("");
+        if host.is_empty() {
+            eprintln!("usage: lonko install-remote <host>");
+            std::process::exit(1);
+        }
+        return install_remote::run(host).map_err(|e| color_eyre::eyre::eyre!(e));
     }
     if args.get(1).map(|s| s.as_str()) == Some("worktree") {
         let cwd = args.get(2).map(|s| s.as_str()).unwrap_or("");
