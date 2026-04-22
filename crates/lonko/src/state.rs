@@ -943,16 +943,30 @@ impl AppState {
         hook_cwd: Option<&str>,
         transcript_path: Option<&str>,
         git_branch: Option<String>,
+        hook_host: Option<&str>,
     ) -> bool {
         if self.sessions.iter().any(|s| s.id == session_id) {
             return true;
         }
 
-        // Try to promote a provisional session discovered by tmux scanner.
+        // Try to promote a provisional session discovered by one of the
+        // scanners. Matching is per-origin: a local hook promotes a
+        // `tmux:<pane>` entry; a remote hook promotes a
+        // `remote:<host>:<pane>` entry for the same host. This keeps
+        // identical pane ids on different tmux servers from colliding.
         let promoted = if let Some(pane) = hook_pane {
-            self.sessions.iter_mut().find(|s| {
-                s.tmux_pane.as_deref() == Some(pane) && s.id.starts_with("tmux:")
-            })
+            match hook_host {
+                Some(host) => self.sessions.iter_mut().find(|s| {
+                    s.tmux_pane.as_deref() == Some(pane)
+                        && s.host.as_deref() == Some(host)
+                        && s.id.starts_with("remote:")
+                }),
+                None => self.sessions.iter_mut().find(|s| {
+                    s.tmux_pane.as_deref() == Some(pane)
+                        && s.host.is_none()
+                        && s.id.starts_with("tmux:")
+                }),
+            }
         } else {
             None
         };
@@ -960,10 +974,18 @@ impl AppState {
         if let Some(s) = promoted {
             s.id = session_id.to_string();
         } else {
-            // Evict any stale session for the same pane.
+            // Evict any stale session for the same pane — but only
+            // within the same origin (local↔local, remote-host↔same
+            // remote-host).
             if let Some(pane) = hook_pane {
                 self.sessions.retain(|s| {
-                    s.tmux_pane.as_deref() != Some(pane) || s.id == session_id
+                    if s.tmux_pane.as_deref() != Some(pane) { return true; }
+                    if s.id == session_id { return true; }
+                    match (s.host.as_deref(), hook_host) {
+                        (None, None) => false,
+                        (Some(a), Some(b)) if a == b => false,
+                        _ => true,
+                    }
                 });
             }
             // Create a new session entry.
@@ -979,6 +1001,9 @@ impl AppState {
             if let Some(tp) = transcript_path
                 && !tp.is_empty() { session.transcript_path = Some(tp.to_string()); }
             session.branch = git_branch;
+            if let Some(h) = hook_host {
+                session.host = Some(h.to_string());
+            }
             self.sessions.push(session);
         }
         true
@@ -1866,7 +1891,7 @@ mod tests {
     fn resolve_hook_session_already_exists() {
         let mut state = AppState::default();
         state.sessions.push(session_with("s1", 100, Some("%1")));
-        assert!(state.resolve_hook_session("s1", None, None, None, None));
+        assert!(state.resolve_hook_session("s1", None, None, None, None, None));
         assert_eq!(state.sessions.len(), 1);
     }
 
@@ -1877,7 +1902,7 @@ mod tests {
         s.status = SessionStatus::Idle;
         state.sessions.push(s);
 
-        assert!(state.resolve_hook_session("real-id", Some("%1"), Some("/tmp"), None, None));
+        assert!(state.resolve_hook_session("real-id", Some("%1"), Some("/tmp"), None, None, None));
         assert_eq!(state.sessions.len(), 1);
         assert_eq!(state.sessions[0].id, "real-id");
     }
@@ -1888,7 +1913,7 @@ mod tests {
         state.sessions.push(session_with("old-id", 1, Some("%5")));
         state.sessions.push(session_with("keep", 2, Some("%6")));
 
-        assert!(state.resolve_hook_session("new-id", Some("%5"), Some("/proj"), None, None));
+        assert!(state.resolve_hook_session("new-id", Some("%5"), Some("/proj"), None, None, None));
         // old-id evicted, keep preserved, new-id created
         assert_eq!(state.sessions.len(), 2);
         assert!(state.sessions.iter().any(|s| s.id == "keep"));
@@ -1898,7 +1923,7 @@ mod tests {
     #[test]
     fn resolve_hook_session_creates_new() {
         let mut state = AppState::default();
-        assert!(state.resolve_hook_session("s1", Some("%1"), Some("/proj"), Some("/t/file"), Some("main".into())));
+        assert!(state.resolve_hook_session("s1", Some("%1"), Some("/proj"), Some("/t/file"), Some("main".into()), None));
         assert_eq!(state.sessions.len(), 1);
         assert_eq!(state.sessions[0].id, "s1");
         assert_eq!(state.sessions[0].tmux_pane.as_deref(), Some("%1"));
@@ -1909,22 +1934,22 @@ mod tests {
     #[test]
     fn resolve_hook_session_empty_cwd_returns_false() {
         let mut state = AppState::default();
-        assert!(!state.resolve_hook_session("s1", None, None, None, None));
-        assert!(!state.resolve_hook_session("s1", None, Some(""), None, None));
+        assert!(!state.resolve_hook_session("s1", None, None, None, None, None));
+        assert!(!state.resolve_hook_session("s1", None, Some(""), None, None, None));
         assert_eq!(state.sessions.len(), 0);
     }
 
     #[test]
     fn resolve_hook_session_no_pane_creates_without_tmux_pane() {
         let mut state = AppState::default();
-        assert!(state.resolve_hook_session("s1", None, Some("/proj"), None, None));
+        assert!(state.resolve_hook_session("s1", None, Some("/proj"), None, None, None));
         assert_eq!(state.sessions[0].tmux_pane, None);
     }
 
     #[test]
     fn resolve_hook_session_empty_transcript_ignored() {
         let mut state = AppState::default();
-        assert!(state.resolve_hook_session("s1", None, Some("/proj"), Some(""), None));
+        assert!(state.resolve_hook_session("s1", None, Some("/proj"), Some(""), None, None));
         assert_eq!(state.sessions[0].transcript_path, None);
     }
 

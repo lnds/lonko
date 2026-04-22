@@ -17,7 +17,22 @@ use crate::state::{SessionOrigin, TmuxSession, TmuxWindow};
 pub struct RemoteSnapshot {
     pub host: String,
     pub sessions: Vec<TmuxSession>,
+    /// One entry per tmux pane on the host that is currently running a
+    /// Claude Code process. Used to pre-populate provisional Agent
+    /// cards so remote sessions show up in the Agents tab immediately,
+    /// without having to wait for the first hook event.
+    pub claude_panes: Vec<RemoteClaudePane>,
     pub is_error: bool,
+}
+
+/// Subset of a remote tmux pane that's enough to seed a provisional
+/// remote Session entry. `cwd` is `pane_current_path` at poll time —
+/// it's what the shell (or claude) has `cd`'d into on the host, which
+/// matches what a hook payload's `cwd` field would carry.
+#[derive(Debug, Clone)]
+pub struct RemoteClaudePane {
+    pub pane_id: String,
+    pub cwd: String,
 }
 
 /// Poll a single remote host over SSH and return its tmux sessions.
@@ -31,7 +46,7 @@ pub fn poll_host(host: &str) -> Result<RemoteSnapshot> {
         "echo '---WINDOWS---';",
         "tmux list-windows -a -F '#{session_name}\x01#{window_index}\x01#{window_name}\x01#{window_active}\x01#{window_panes}' 2>/dev/null;",
         "echo '---PANES---';",
-        "tmux list-panes -a -F '#{session_name}\x01#{pane_pid}' 2>/dev/null;",
+        "tmux list-panes -a -F '#{session_name}\x01#{pane_id}\x01#{pane_pid}\x01#{pane_current_path}' 2>/dev/null;",
         "echo '---PROCS---';",
         "ps -eo pid,ppid,comm 2>/dev/null",
     );
@@ -122,28 +137,64 @@ fn parse_poll_output(host: &str, output: &str) -> RemoteSnapshot {
         }
     }
 
-    // 3. Parse pane→session mapping (session_name, pane_pid)
-    let pane_pids: Vec<(String, u32)> = panes_block
+    // 3. Parse pane rows (session_name, pane_id, pane_pid, pane_current_path).
+    let panes: Vec<PaneRow> = panes_block
         .lines()
         .filter_map(|line| {
-            let mut p = line.splitn(2, '\x01');
-            let sess = p.next()?.trim().to_string();
-            let pid: u32 = p.next()?.trim().parse().ok()?;
-            Some((sess, pid))
+            let mut p = line.splitn(4, '\x01');
+            let session_name = p.next()?.trim().to_string();
+            let pane_id = p.next()?.trim().to_string();
+            let pane_pid: u32 = p.next()?.trim().parse().ok()?;
+            let cwd = p.next().unwrap_or("").trim().to_string();
+            if pane_id.is_empty() {
+                return None;
+            }
+            Some(PaneRow { session_name, pane_id, pane_pid, cwd })
         })
         .collect();
 
-    // 4. Parse process table and detect Claude
+    // 4. Walk the process table to map each Claude PID back to the pane
+    // that owns it. Sessions with a matching pane are tagged `has_claude`;
+    // the matching panes themselves surface as `RemoteClaudePane` entries
+    // so the caller can seed provisional Agent cards from them.
     let procs = parse_process_table(&procs_block);
-    let claude_sessions = find_claude_sessions(&pane_pids, &procs);
+    let claude_panes = find_claude_panes(&panes, &procs);
+
+    let claude_session_names: std::collections::HashSet<&str> = claude_panes
+        .iter()
+        .filter_map(|(pane_id, _cwd)| {
+            panes
+                .iter()
+                .find(|p| p.pane_id == *pane_id)
+                .map(|p| p.session_name.as_str())
+        })
+        .collect();
 
     for session in &mut sessions {
-        if claude_sessions.contains(&session.name) {
+        if claude_session_names.contains(session.name.as_str()) {
             session.has_claude = true;
         }
     }
 
-    RemoteSnapshot { host: host.to_string(), sessions, is_error: false }
+    let claude_panes = claude_panes
+        .into_iter()
+        .map(|(pane_id, cwd)| RemoteClaudePane { pane_id, cwd })
+        .collect();
+
+    RemoteSnapshot {
+        host: host.to_string(),
+        sessions,
+        claude_panes,
+        is_error: false,
+    }
+}
+
+/// One row from `tmux list-panes -a`.
+struct PaneRow {
+    session_name: String,
+    pane_id: String,
+    pane_pid: u32,
+    cwd: String,
 }
 
 /// Parsed process: (pid, ppid, comm).
@@ -165,15 +216,17 @@ fn parse_process_table(block: &str) -> Vec<ProcEntry> {
         .collect()
 }
 
-/// Walk up the process tree from each claude PID to find which pane (session)
-/// it belongs to.  Returns the set of session names that have Claude running.
-fn find_claude_sessions(
-    pane_pids: &[(String, u32)],
+/// Walk the process tree from each Claude PID back to the enclosing
+/// tmux pane. Returns `(pane_id, cwd)` for every pane that currently
+/// contains a Claude process, deduplicated — multiple Claude processes
+/// in the same pane collapse to one entry.
+fn find_claude_panes(
+    panes: &[PaneRow],
     procs: &[ProcEntry],
-) -> Vec<String> {
-    let pane_pid_set: std::collections::HashMap<u32, &str> = pane_pids
+) -> Vec<(String, String)> {
+    let by_pid: std::collections::HashMap<u32, &PaneRow> = panes
         .iter()
-        .map(|(sess, pid)| (*pid, sess.as_str()))
+        .map(|p| (p.pane_pid, p))
         .collect();
 
     let ppid_map: std::collections::HashMap<u32, u32> = procs
@@ -187,16 +240,18 @@ fn find_claude_sessions(
         .map(|p| p.pid)
         .collect();
 
-    let mut result = Vec::new();
+    let mut result: Vec<(String, String)> = Vec::new();
+    let mut seen_panes: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     for claude_pid in claude_pids {
         // Walk up the process tree (max 15 levels) looking for a pane PID.
         let mut current = claude_pid;
         for _ in 0..15 {
-            if let Some(session_name) = pane_pid_set.get(&current) {
-                if !result.contains(&session_name.to_string()) {
-                    result.push(session_name.to_string());
-                }
+            if let Some(pane) = by_pid.get(&current)
+                && seen_panes.insert(pane.pane_id.clone())
+            {
+                result.push((pane.pane_id.clone(), pane.cwd.clone()));
                 break;
             }
             match ppid_map.get(&current) {
@@ -221,9 +276,9 @@ main\x010\x01bash\x011\x011
 main\x011\x01vim\x010\x011
 work\x010\x01dev\x011\x012
 ---PANES---
-main\x011000
-main\x011001
-work\x011100
+main\x01%0\x011000\x01/home/u/main
+main\x01%1\x011001\x01/home/u/vim
+work\x01%2\x011100\x01/home/u/work
 ---PROCS---
   PID  PPID COMM
     1     0 init
@@ -288,7 +343,7 @@ dev\x010\x011713200000
 ---WINDOWS---
 dev\x010\x01bash\x011\x011
 ---PANES---
-dev\x015000
+dev\x01%0\x015000\x01/home/u/dev
 ---PROCS---
   PID  PPID COMM
     1     0 init
@@ -297,5 +352,16 @@ dev\x015000
 ";
         let snap = parse_poll_output("host", output);
         assert!(!snap.sessions[0].has_claude);
+        assert!(snap.claude_panes.is_empty());
+    }
+
+    #[test]
+    fn exposes_claude_pane_id_and_cwd() {
+        let snap = parse_poll_output("testhost", POLL_OUTPUT);
+        // Claude (pid 3000) lives in pane %2 (pane_pid 1100) in session "work".
+        assert_eq!(snap.claude_panes.len(), 1);
+        let pane = &snap.claude_panes[0];
+        assert_eq!(pane.pane_id, "%2");
+        assert_eq!(pane.cwd, "/home/u/work");
     }
 }

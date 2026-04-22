@@ -826,6 +826,7 @@ impl App {
                 hook_cwd,
                 payload.transcript_path.as_deref(),
                 hook_cwd.and_then(transcript::git_branch),
+                payload.host.as_deref(),
             ) {
                 return;
             }
@@ -1088,11 +1089,12 @@ impl App {
             self.sync_remote_bridges();
         }
 
-        // Per-host tmux polling stays scoped to the Remote tab so that
-        // the per-second SSH burst does not run when the user isn't
-        // looking at its output. Uses the cached online set populated
-        // by the background discovery above.
-        if self.state.active_tab == Tab::Remote
+        // Per-host tmux polling runs whenever remote support is enabled
+        // (not gated on the active tab). It is the ONLY way remote
+        // Agents show up proactively in the Agents tab — without it we
+        // would have to wait for the first hook event, which never
+        // comes if the remote Claude is idle.
+        if self.state.remote_enabled
             && self.state.tick.is_multiple_of(10)
             && let Some(ref tx) = self.scan_tx
         {
@@ -1119,6 +1121,7 @@ impl App {
                                 crate::sources::remote_tmux::RemoteSnapshot {
                                     host: host.clone(),
                                     sessions: vec![],
+                                    claude_panes: vec![],
                                     is_error: true,
                                 },
                             ));
@@ -1192,17 +1195,22 @@ impl App {
     }
 
     fn on_remote_snapshot(&mut self, snapshot: crate::sources::remote_tmux::RemoteSnapshot) {
-        let is_error = snapshot.is_error;
+        let crate::sources::remote_tmux::RemoteSnapshot {
+            host: snapshot_host,
+            sessions,
+            claude_panes,
+            is_error,
+        } = snapshot;
         let tick = self.state.tick;
         let base = self.state.remote_poll_ticks;
-        if let Some(host) = self.state.remote_hosts.iter_mut().find(|h| h.hostname == snapshot.host) {
+        if let Some(host) = self.state.remote_hosts.iter_mut().find(|h| h.hostname == snapshot_host) {
             if is_error {
                 host.status = crate::state::HostStatus::Unreachable;
                 host.fail_count += 1;
                 host.next_poll_tick = Self::backoff_ticks(base, host.fail_count, tick);
             } else {
                 host.status = crate::state::HostStatus::Online;
-                host.sessions = snapshot.sessions;
+                host.sessions = sessions;
                 host.fail_count = 0;
                 host.next_poll_tick = tick + base;
             }
@@ -1213,9 +1221,9 @@ impl App {
                 (crate::state::HostStatus::Online, 0, tick + base)
             };
             self.state.remote_hosts.push(crate::state::RemoteHost {
-                hostname: snapshot.host,
+                hostname: snapshot_host.clone(),
                 status,
-                sessions: snapshot.sessions,
+                sessions,
                 fail_count,
                 next_poll_tick,
             });
@@ -1224,10 +1232,63 @@ impl App {
                 a.hostname.to_ascii_lowercase().cmp(&b.hostname.to_ascii_lowercase())
             });
         }
+
+        // Seed provisional Agent entries for each pane on this host that
+        // currently has a Claude process running. Hooks (when they
+        // eventually fire) promote these in-place — see
+        // `resolve_hook_session`'s `remote:<host>:<pane>` branch.
+        if !is_error {
+            self.seed_remote_provisional_agents(&snapshot_host, &claude_panes);
+        }
+
         // Clamp selection.
         let count = self.state.remote_item_count();
         if count > 0 {
             self.state.remote_selected = self.state.remote_selected.min(count - 1);
+        }
+    }
+
+    /// Create a provisional `remote:<host>:<pane>` session for every
+    /// Claude pane reported by the latest poll, skipping any we already
+    /// track (either as an unpromoted provisional or as a real hook-
+    /// discovered session).
+    fn seed_remote_provisional_agents(
+        &mut self,
+        host: &str,
+        claude_panes: &[crate::sources::remote_tmux::RemoteClaudePane],
+    ) {
+        for pane in claude_panes {
+            let provisional_id = format!("remote:{host}:{}", pane.pane_id);
+            let already_tracked = self.state.sessions.iter().any(|s| {
+                s.id == provisional_id
+                    || (s.host.as_deref() == Some(host)
+                        && s.tmux_pane.as_deref() == Some(pane.pane_id.as_str()))
+            });
+            if already_tracked {
+                continue;
+            }
+
+            let cwd = if pane.cwd.is_empty() {
+                format!("remote:{host}") // fallback; display_name needs a cwd
+            } else {
+                pane.cwd.clone()
+            };
+
+            let mut session = Session::new(provisional_id, 0, cwd.clone());
+            session.status = SessionStatus::Idle;
+            session.tmux_pane = Some(pane.pane_id.clone());
+            session.host = Some(host.to_string());
+            // Paths from the remote generally don't resolve against the
+            // local git; fall back to the literal cwd so the session
+            // still groups sensibly in the Agents list.
+            session.repo_root = Some(
+                crate::worktree::repo_common_root(&cwd).unwrap_or_else(|| cwd.clone()),
+            );
+            tracing::info!(
+                "seeded provisional remote agent: host={host} pane={} cwd={cwd}",
+                pane.pane_id
+            );
+            self.state.sessions.push(session);
         }
     }
 
