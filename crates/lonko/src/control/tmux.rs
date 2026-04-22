@@ -1,11 +1,16 @@
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::agents::claude;
 
 /// Switch the current tmux client to the target pane's session/window.
+///
+/// Swallows stderr so tmux's "can't find pane" (hit on remote pane IDs
+/// that do not exist on this server) does not bleed onto the TUI's
+/// alternate screen buffer.
 pub fn focus_pane(pane_id: &str) -> anyhow::Result<()> {
     let status = Command::new("tmux")
         .args(["switch-client", "-t", pane_id])
+        .stderr(Stdio::null())
         .status()?;
     if !status.success() {
         anyhow::bail!("tmux switch-client failed for pane {pane_id}");
@@ -31,10 +36,11 @@ pub fn find_main_client() -> Option<String> {
     None
 }
 
-/// Focus a pane (select it as active).
+/// Focus a pane (select it as active). Silences stderr — see `focus_pane`.
 pub fn select_pane(pane_id: &str) -> anyhow::Result<()> {
     let status = Command::new("tmux")
         .args(["select-pane", "-t", pane_id])
+        .stderr(Stdio::null())
         .status()?;
     if !status.success() {
         anyhow::bail!("tmux select-pane failed");
@@ -46,6 +52,7 @@ pub fn select_pane(pane_id: &str) -> anyhow::Result<()> {
 pub fn select_last_pane() -> anyhow::Result<()> {
     let status = Command::new("tmux")
         .args(["select-pane", "-l"])
+        .stderr(Stdio::null())
         .status()?;
     if !status.success() {
         anyhow::bail!("tmux select-pane -l failed");
@@ -70,6 +77,7 @@ pub fn active_pane() -> Option<String> {
 pub fn send_keys(pane_id: &str, keys: &str) -> anyhow::Result<()> {
     let status = Command::new("tmux")
         .args(["send-keys", "-t", pane_id, "-l", keys])
+        .stderr(Stdio::null())
         .status()?;
 
     if !status.success() {

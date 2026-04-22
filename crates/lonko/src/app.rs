@@ -899,11 +899,16 @@ impl App {
             }
         }
         // Scan tmux panes every 5 seconds to catch new/gone sessions.
+        // Remote sessions are excluded: their pane IDs belong to a different
+        // tmux server and would trigger spurious `TmuxPaneGone` (which in
+        // turn removes the session, making the remote agent flicker in and
+        // out of the Agents list).
         if self.state.tick.is_multiple_of(50)
             && let Some(ref tx) = self.scan_tx
         {
             let known_panes: Vec<String> = self.state.sessions
                 .iter()
+                .filter(|s| s.host.is_none())
                 .filter_map(|s| s.tmux_pane.clone())
                 .collect();
             tmux_scanner::scan(tx, &known_panes, self.state.own_pane.as_deref());
