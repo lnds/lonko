@@ -15,6 +15,9 @@ const DIM: Color = Color::Rgb(86, 95, 137);
 const BORDER_INACTIVE: Color = Color::Rgb(59, 66, 97);
 const BLUE: Color = Color::Rgb(122, 162, 247);
 const SUBTLE: Color = Color::Rgb(169, 177, 214);
+/// Purple accent used throughout the UI to mark SSH/remote agents.
+/// Mirrors the value used in `ui/remote.rs` for the Remote tab cards.
+const SSH_ACCENT: Color = Color::Rgb(187, 154, 247);
 const TEXT: Color = Color::Rgb(192, 202, 245);
 const YELLOW: Color = Color::Rgb(224, 175, 104);
 const ORANGE: Color = Color::Rgb(255, 158, 100);   // tokyo night orange #ff9e64
@@ -479,7 +482,14 @@ struct CardCtx<'a> {
 
 fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: CardCtx<'_>) {
     let CardCtx { selected, focused, tick, position, icon, bookmark_note, worktree_input, bookmark_input, subagent_count } = ctx;
-    let accent = session_color(position);
+    // Remote agents get the shared purple SSH accent so they stand out from
+    // local ones at a glance (and match the Remote-tab palette). Local
+    // agents keep their per-slot palette color for mutual distinction.
+    let accent = if session.host.is_some() {
+        SSH_ACCENT
+    } else {
+        session_color(position)
+    };
     let is_waiting = session.status.is_waiting();
     let is_waiting_input = session.status.is_waiting_input();
 
@@ -539,11 +549,16 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
         Style::default().fg(Color::Rgb(15, 15, 25)).bg(avatar_bg),
     );
 
-    let branch_str = session
-        .branch
-        .as_deref()
-        .map(|b| format!(" ⑂ {}", b))
-        .unwrap_or_default();
+    // Branch + optional `@host` suffix for remote agents. Appending the
+    // host into the same string means the existing truncation logic
+    // handles the combined width without a separate layout pass. Both
+    // parts render in DIM so they read as secondary to the agent name.
+    let branch_str = match (session.branch.as_deref(), session.host.as_deref()) {
+        (Some(b), Some(h)) => format!(" ⑂ {} @{}", b, h),
+        (Some(b), None)    => format!(" ⑂ {}", b),
+        (None,    Some(h)) => format!(" @{}", h),
+        (None,    None)    => String::new(),
+    };
 
     // Line 1: avatar + project name + branch (number appears below avatar on line 2)
     // Truncate name/branch so neither overflows the card width.
