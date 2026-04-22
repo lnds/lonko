@@ -102,7 +102,13 @@ pub fn attach_remote_agent(host: &str, pane_id: &str) {
     let local_session = format!("remote/{short}");
     ensure_remote_host_session(host, &local_session);
 
-    // Switch the local client into the remote/<host> wrapper session.
+    // The upcoming `switch-client` fires `client-session-changed`, which
+    // the tmux follow hook would otherwise react to by killing and
+    // respawning lonko in the new session. That restart empties the
+    // Agents list and remote agents only come back after the bridges
+    // re-establish (several seconds). The sentinel tells the follow
+    // script that lonko navigated intentionally — skip this round.
+    write_no_follow_sentinel();
     let _ = std::process::Command::new("tmux")
         .args(["switch-client", "-t", &local_session])
         .status();
@@ -581,6 +587,9 @@ impl App {
         let local_session = format!("remote/{short}");
         ensure_remote_host_session(host, &local_session);
 
+        // See `attach_remote_agent`: suppress the follow script so lonko
+        // stays put when we switch-client into `remote/<host>`.
+        write_no_follow_sentinel();
         let _ = std::process::Command::new("tmux")
             .args(["switch-client", "-t", &local_session])
             .status();
@@ -950,6 +959,13 @@ impl App {
                 } else {
                     self.state.remote_selected = 0;
                 }
+                // Start bridges without waiting for the next 2s tick —
+                // matters most right after lonko launches, when every
+                // extra second delays when remote agents first appear
+                // in the Agents list.
+                if self.state.remote_enabled {
+                    self.sync_remote_bridges();
+                }
             }
             Event::RemoteBridgeStarted { host, result } => {
                 self.remote_bridge_starting.remove(&host);
@@ -1034,9 +1050,11 @@ impl App {
         // tab. The resulting `RemotePeersOnline` event is what keeps
         // `sync_remote_bridges` informed — without it, bridges would
         // only come up while the user happens to be looking at the
-        // Remote tab.
+        // Remote tab. Tick 1 also fires, so first-time discovery
+        // happens ~100 ms after lonko launches instead of waiting a
+        // full 2 s interval.
         if self.state.remote_enabled
-            && self.state.tick.is_multiple_of(20)
+            && (self.state.tick.is_multiple_of(20) || self.state.tick == 1)
             && let Some(ref tx) = self.scan_tx
         {
             let excluded = self.state.excluded_hosts.clone();
