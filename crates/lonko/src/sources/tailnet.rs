@@ -78,14 +78,20 @@ fn parse_peers(json: &[u8]) -> Result<Vec<TailnetPeer>> {
             self_hostname.as_deref() != Some(&p.hostname.to_ascii_lowercase())
         })
         .map(|p| TailnetPeer {
-            hostname: p.hostname,
+            // Normalise to lowercase so this matches what `lonko-hook
+            // --remote-tag <host>` stamps into events (the installer
+            // uses the user-typed arg verbatim, usually lowercase).
+            // Without this, the same host ends up as two separate
+            // agents: one provisional seeded from the uppercase
+            // Tailscale name, and one promoted from a lowercase hook.
+            hostname: p.hostname.to_ascii_lowercase(),
             dns_name: strip_trailing_dot(p.dns_name),
             os: p.os,
         })
         .collect();
 
-    // Stable, predictable order by hostname (case-insensitive).
-    peers.sort_by(|a, b| a.hostname.to_ascii_lowercase().cmp(&b.hostname.to_ascii_lowercase()));
+    // Stable, predictable order by hostname (already lowercase above).
+    peers.sort_by(|a, b| a.hostname.cmp(&b.hostname));
 
     Ok(peers)
 }
@@ -149,7 +155,8 @@ mod tests {
                     os: "linux".into(),
                 },
                 TailnetPeer {
-                    hostname: "Charlie".into(),
+                    // Source name is "Charlie"; we lowercase at intake.
+                    hostname: "charlie".into(),
                     dns_name: "charlie.example.ts.net".into(),
                     os: "macOS".into(),
                 },
