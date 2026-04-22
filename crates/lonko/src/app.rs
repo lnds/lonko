@@ -316,6 +316,15 @@ impl App {
             self.state.selected = global_idx;
             let session = self.state.selected_session().cloned();
             if let Some(session) = session {
+                // Remote sessions cannot be focused through the local tmux
+                // server — their pane IDs belong to another host. Doing
+                // nothing is the right answer until LONKO-51 routes attach
+                // over SSH. (Attaching from the Remote tab is the current
+                // escape hatch: it spawns a new-window `ssh -t host tmux
+                // attach`.)
+                if session.host.is_some() {
+                    return;
+                }
                 let pid = session.pid;
                 let session_id = session.id.clone();
                 let pane = session.tmux_pane.clone()
@@ -335,12 +344,8 @@ impl App {
                         for delay_ms in [30u64, 60, 100, 160, 240] {
                             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                             if gen_arc.load(Ordering::SeqCst) != my_gen { break; }
-                            let _ = std::process::Command::new("tmux")
-                                .args(["select-pane", "-t", &p])
-                                .status();
-                            let _ = std::process::Command::new("tmux")
-                                .args(["switch-client", "-t", &p])
-                                .status();
+                            let _ = tmux::select_pane(&p);
+                            let _ = tmux::focus_pane(&p);
                         }
                     });
                 }
@@ -562,6 +567,12 @@ impl App {
 
     fn focus_selected(&mut self) {
         let Some(session) = self.state.selected_session() else { return };
+        // Remote sessions live on another tmux server; focusing them
+        // locally is both meaningless and noisy (tmux "can't find pane").
+        // LONKO-51 will replace this no-op with an SSH attach.
+        if session.host.is_some() {
+            return;
+        }
         let pid = session.pid;
         let session_id = session.id.clone();
         let stored_pane = session.tmux_pane.clone();
