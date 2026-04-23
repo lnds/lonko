@@ -1,3 +1,13 @@
+## v0.16.1 (2026-04-22)
+
+### Fix
+
+- **follow**: skip follow into remote/<host> sessions (LONKO-53)
+
+### Refactor
+
+- **follow**: move lonko with join-pane to preserve state
+
 ## v0.16.0 (2026-04-22)
 
 ### Feat
