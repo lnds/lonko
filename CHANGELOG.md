@@ -1,3 +1,9 @@
+## v0.16.4 (2026-04-22)
+
+### Fix
+
+- **state**: ignore /loop sentinels as last_prompt
+
 ## v0.16.3 (2026-04-22)
 
 ### Fix
