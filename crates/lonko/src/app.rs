@@ -444,12 +444,14 @@ impl App {
                         s.tmux_pane = Some(p.clone());
                     }
                     self.state.focused_session_id = Some(session_id);
-                    // Repeat select-pane for 300ms to beat tmux mouse-mode:
-                    // every MouseUp/MouseDown re-selects lonko, so we
-                    // overwrite that repeatedly until pending mouse events
-                    // drain. The follow script uses `join-pane`, which
-                    // preserves lonko's process across window moves, so
-                    // there's no need to suppress it here.
+                    // Do the window move + switch-client up front so the
+                    // user lands on a window that already has the sidebar
+                    // parked at 25%. The retry loop below only re-asserts
+                    // `select-pane` to beat tmux mouse-mode's own cursor
+                    // reselection (every MouseUp/MouseDown re-selects the
+                    // lonko pane), so we don't want to repeat the expensive
+                    // join-pane + switch-client on every tick.
+                    self.focus_local_agent_pane(&p);
                     use std::sync::atomic::Ordering;
                     let my_gen = self.focus_gen.fetch_add(1, Ordering::SeqCst) + 1;
                     let gen_arc = self.focus_gen.clone();
@@ -458,7 +460,6 @@ impl App {
                             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                             if gen_arc.load(Ordering::SeqCst) != my_gen { break; }
                             let _ = tmux::select_pane(&p);
-                            let _ = tmux::focus_pane(&p);
                         }
                     });
                 }
@@ -720,13 +721,48 @@ impl App {
             if let Some(s) = self.state.sessions.iter_mut().find(|s| s.id == session_id) {
                 s.tmux_pane = Some(pane.clone());
             }
-            let _ = tmux::select_pane(pane);
-            let _ = tmux::focus_pane(pane);
+            self.focus_local_agent_pane(pane);
             self.state.focused_session_id = Some(session_id);
         } else {
             tracing::warn!("focus_selected: no pane found for pid={pid}, using select_last_pane");
             let _ = tmux::select_last_pane();
         }
+    }
+
+    /// Focus a local agent pane as smoothly as possible:
+    ///   - Pre-move lonko's own pane into the target window BEFORE the
+    ///     switch-client, so the user arrives to a window that already has
+    ///     the sidebar in place (no flash, no layout reflow after arrival).
+    ///   - Skip the switch-client entirely when the pane lives in the
+    ///     window that's already active — a plain `select-pane` suffices.
+    /// The no-follow sentinel is still written so any hook that races in
+    /// finds lonko already parked where it belongs and exits via the
+    /// `already-here` branch instead of redoing the move.
+    fn focus_local_agent_pane(&self, pane: &str) {
+        let target_win = tmux::tmux_window_for_pane(pane);
+        let current_win = tmux::current_window();
+
+        // Fast path (D): pane lives in the active window — no window switch
+        // needed. `select-pane` alone makes tmux focus the target pane.
+        if let (Some(t), Some(c)) = (target_win.as_deref(), current_win.as_deref())
+            && t == c
+        {
+            let _ = tmux::select_pane(pane);
+            return;
+        }
+
+        // Slow path (A): pre-move lonko into the target window so the
+        // sidebar is already there when the client switches.
+        if let (Some(own), Some(target)) = (self.state.own_pane.as_deref(), target_win.as_deref()) {
+            let lonko_win = tmux::tmux_window_for_pane(own);
+            if lonko_win.as_deref() != Some(target) {
+                write_no_follow_sentinel();
+                let _ = tmux::join_pane_right(own, target, 25);
+            }
+        }
+
+        let _ = tmux::select_pane(pane);
+        let _ = tmux::focus_pane(pane);
     }
 
     fn refresh_selected_transcript(&mut self) {
@@ -1956,8 +1992,7 @@ impl App {
             self.state.selected = vis.iter()
                 .position(|s| s.id == session_id)
                 .unwrap_or(0);
-            let _ = tmux::select_pane(pane);
-            let _ = tmux::focus_pane(pane);
+            self.focus_local_agent_pane(pane);
             self.state.focused_session_id = Some(session_id);
             self.write_sessions_cache();
         }

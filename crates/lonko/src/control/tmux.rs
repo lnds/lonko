@@ -325,6 +325,38 @@ pub fn tmux_window_for_pane(pane_id: &str) -> Option<String> {
     if id.is_empty() { None } else { Some(id) }
 }
 
+/// Move an existing pane into a target window as a full-height right-hand
+/// column at the given percentage. `-d` leaves focus where it was so this
+/// doesn't steal the user's cursor. Mirrors what `lonko-follow.sh` does
+/// when the hook fires, but lets the caller trigger the move proactively.
+pub fn join_pane_right(src_pane: &str, target_window: &str, width_pct: u8) -> anyhow::Result<()> {
+    let status = Command::new("tmux")
+        .args([
+            "join-pane",
+            "-d",
+            "-h", "-f",
+            "-l", &format!("{width_pct}%"),
+            "-s", src_pane,
+            "-t", target_window,
+        ])
+        .stderr(Stdio::null())
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("tmux join-pane failed for src={src_pane} dst={target_window}");
+    }
+    Ok(())
+}
+
+/// Return the window id of the client's currently active window.
+pub fn current_window() -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "#{window_id}"])
+        .output()
+        .ok()?;
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if id.is_empty() { None } else { Some(id) }
+}
+
 /// Return a map of pane_id → pane_current_path for all tmux panes.
 fn pane_path_map() -> std::collections::HashMap<String, String> {
     let Ok(output) = Command::new("tmux")
