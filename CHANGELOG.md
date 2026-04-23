@@ -1,3 +1,9 @@
+## v0.17.2 (2026-04-23)
+
+### Fix
+
+- **focus**: use lonko's window and skip pre-move when target has lonko
+
 ## v0.17.1 (2026-04-23)
 
 ### Perf
