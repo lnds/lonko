@@ -1361,8 +1361,21 @@ impl App {
     }
 
     fn on_session_discovered(&mut self, file: crate::sources::lifecycle::SessionFile) {
+        // The lifecycle file's `sessionId` is stale after `/clear` (Claude Code
+        // does not rewrite it). Prefer the most recent transcript for the cwd
+        // so we pick up the live session instead of a days-old one whose last
+        // prompt is long obsolete.
+        let (transcript_path, session_id) =
+            match transcript::most_recent_transcript_session(&file.cwd) {
+                Some((path, id)) => (path, id),
+                None => (
+                    transcript::transcript_path(&file.cwd, &file.session_id),
+                    file.session_id.clone(),
+                ),
+            };
+
         // If pre-created by hook (pid=0), update with real pid now
-        if let Some(s) = self.state.sessions.iter_mut().find(|s| s.id == file.session_id && s.pid == 0) {
+        if let Some(s) = self.state.sessions.iter_mut().find(|s| s.id == session_id && s.pid == 0) {
             s.pid = file.pid;
         }
         // Resolve tmux pane immediately so eviction logic works by pane.
@@ -1370,19 +1383,19 @@ impl App {
         // Skip if already tracked by pid, session_id, or pane.
         let exists = self.state.sessions.iter().any(|s| {
             s.pid == file.pid
-                || s.id == file.session_id
+                || s.id == session_id
                 || (tmux_pane.is_some() && s.tmux_pane == tmux_pane)
         });
         if exists { return; }
 
-        let mut session = Session::new(file.session_id.clone(), file.pid, file.cwd.clone());
+        let mut session = Session::new(session_id, file.pid, file.cwd.clone());
         session.status = SessionStatus::Idle;
         session.tmux_pane = tmux_pane;
+        session.transcript_path = Some(transcript_path.to_string_lossy().into_owned());
         session.repo_root = Some(
             crate::worktree::repo_common_root(&file.cwd).unwrap_or_else(|| file.cwd.clone()),
         );
-        let path = transcript::transcript_path(&file.cwd, &file.session_id);
-        if let Some(mut info) = transcript::read_latest(&path) {
+        if let Some(mut info) = transcript::read_latest(&transcript_path) {
             info.branch = transcript::git_branch(&file.cwd).or(info.branch);
             session.apply_transcript_info(info);
         } else {

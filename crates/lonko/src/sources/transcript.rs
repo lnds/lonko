@@ -15,6 +15,34 @@ pub fn transcript_path(cwd: &str, session_id: &str) -> PathBuf {
     claude::transcript_path(cwd, session_id)
 }
 
+/// Return the path of the most recently modified `.jsonl` transcript for
+/// `cwd`, or `None` if no transcripts exist. Used to recover the current
+/// session id when the lifecycle file (`~/.claude/sessions/<pid>.json`) is
+/// stale — Claude Code rewrites the transcript on every `/clear`, but does
+/// not update the lifecycle file's `sessionId`, so the lifecycle file can
+/// point at a sessionId that was superseded days ago.
+pub fn most_recent_transcript_session(cwd: &str) -> Option<(PathBuf, String)> {
+    let dir = claude::transcript_path(cwd, "").parent()?.to_path_buf();
+    let entries = std::fs::read_dir(&dir).ok()?;
+
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(mtime) = meta.modified() else { continue };
+        if best.as_ref().is_none_or(|(t, _)| mtime > *t) {
+            best = Some((mtime, path));
+        }
+    }
+
+    let (_, path) = best?;
+    let session_id = path.file_stem()?.to_str()?.to_string();
+    Some((path, session_id))
+}
+
 /// Clean a raw prompt string for display.
 /// Claude Code encodes slash commands as XML tags like:
 ///   <command-message>args</command-message><command-name>/skill</command-name>...
