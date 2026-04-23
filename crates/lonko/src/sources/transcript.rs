@@ -36,16 +36,20 @@ fn clean_prompt(text: &str) -> String {
 
 /// `true` when a user-role text block is a runtime-injected message rather
 /// than a real prompt typed by the user. Claude Code slips these into the
-/// conversation as `type: "text"` user blocks, and without filtering they
-/// end up shown as the "last prompt" on the agent card.
-fn is_system_injected(text: &str) -> bool {
+/// conversation as `type: "text"` user blocks and also ships them as the
+/// `prompt` field of `UserPromptSubmit` hooks when the runtime re-fires a
+/// scheduled `/loop`. Without filtering they end up shown as the
+/// "last prompt" on the agent card.
+pub(crate) fn is_system_injected(text: &str) -> bool {
     const PREFIXES: &[&str] = &[
         "<task-notification>",
         "<system-reminder>",
         "<user-prompt-submit-hook>",
-        "<bash-",            // <bash-input>, <bash-stdout>, <bash-stderr>
-        "<local-command-",   // <local-command-stdout>, <local-command-stderr>
-        "Base directory",    // initial system message from Claude Code
+        "<bash-",                     // <bash-input>, <bash-stdout>, <bash-stderr>
+        "<local-command-",            // <local-command-stdout>, <local-command-stderr>
+        "<<autonomous-loop-dynamic",  // /loop dynamic self-pacing sentinel
+        "<<autonomous-loop>",         // /loop CronCreate sentinel
+        "Base directory",             // initial system message from Claude Code
         "Caveat: The messages below were generated",
     ];
     PREFIXES.iter().any(|p| text.starts_with(p))
@@ -204,6 +208,14 @@ mod tests {
     #[test]
     fn is_system_injected_flags_base_directory() {
         assert!(is_system_injected("Base directory: /tmp/x"));
+    }
+
+    #[test]
+    fn is_system_injected_flags_autonomous_loop_sentinels() {
+        assert!(is_system_injected("<<autonomous-loop-dynamic>"));
+        assert!(is_system_injected("<<autonomous-loop-dynamic>>"));
+        assert!(is_system_injected("<<autonomous-loop>"));
+        assert!(is_system_injected("<<autonomous-loop>>"));
     }
 
     #[test]

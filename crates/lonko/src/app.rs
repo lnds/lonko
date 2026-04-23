@@ -57,7 +57,10 @@ pub fn hook_event_to_status(
         "UserPromptSubmit" => {
             if let Some(p) = &payload.prompt {
                 let text = p.trim();
-                if !text.is_empty() {
+                // Skip `<<autonomous-loop-dynamic>` and similar runtime
+                // sentinels — they're scheduled re-fires, not prompts the
+                // user just typed.
+                if !text.is_empty() && !transcript::is_system_injected(text) {
                     session.last_prompt = Some(text.to_string());
                 }
             }
