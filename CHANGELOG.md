@@ -1,3 +1,9 @@
+## v0.17.0 (2026-04-23)
+
+### Feat
+
+- **ui**: press e to expand subagents inline (LONKO-54)
+
 ## v0.16.5 (2026-04-23)
 
 ### Fix
