@@ -1,3 +1,9 @@
+## v0.16.5 (2026-04-23)
+
+### Fix
+
+- **state**: use most recent transcript for lifecycle-discovered sessions
+
 ## v0.16.4 (2026-04-22)
 
 ### Fix
