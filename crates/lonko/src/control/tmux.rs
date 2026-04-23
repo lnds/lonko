@@ -347,14 +347,21 @@ pub fn join_pane_right(src_pane: &str, target_window: &str, width_pct: u8) -> an
     Ok(())
 }
 
-/// Return the window id of the client's currently active window.
-pub fn current_window() -> Option<String> {
-    let output = Command::new("tmux")
-        .args(["display-message", "-p", "#{window_id}"])
+/// `true` when `window_id` already contains at least one pane whose
+/// `pane_current_command` is `lonko`. Used by the focus path to avoid
+/// stacking a second lonko sidebar next to one that's already visible
+/// (e.g. an ssh pane attached to a remote whose tmux carries its own
+/// lonko).
+pub fn window_has_lonko_pane(window_id: &str) -> bool {
+    let Ok(output) = Command::new("tmux")
+        .args(["list-panes", "-t", window_id, "-F", "#{pane_current_command}"])
         .output()
-        .ok()?;
-    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if id.is_empty() { None } else { Some(id) }
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|l| l.trim() == "lonko")
 }
 
 /// Return a map of pane_id → pane_current_path for all tmux panes.

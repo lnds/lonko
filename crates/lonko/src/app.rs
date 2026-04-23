@@ -730,35 +730,47 @@ impl App {
     }
 
     /// Focus a local agent pane as smoothly as possible:
-    ///   - Pre-move lonko's own pane into the target window BEFORE the
-    ///     switch-client, so the user arrives to a window that already has
-    ///     the sidebar in place (no flash, no layout reflow after arrival).
-    ///   - Skip the switch-client entirely when the pane lives in the
-    ///     window that's already active — a plain `select-pane` suffices.
-    /// The no-follow sentinel is still written so any hook that races in
-    /// finds lonko already parked where it belongs and exits via the
-    /// `already-here` branch instead of redoing the move.
+    ///   - Fast path: when the pane already lives in lonko's window, a
+    ///     plain `select-pane` focuses it without a client-session-changed
+    ///     round-trip.
+    ///   - Slow path: pre-move lonko's own pane into the target window
+    ///     via `join-pane` BEFORE `switch-client`, so the user arrives to
+    ///     a window that already has the sidebar in place (no flash, no
+    ///     post-arrival reflow). We skip the pre-move when the target
+    ///     window already has a lonko (e.g. an ssh pane whose remote tmux
+    ///     carries its own sidebar — moving ours in would stack two
+    ///     panels, LONKO-53).
+    ///
+    /// The no-follow sentinel is written before the pre-move so any hook
+    /// that races in finds lonko already parked where it belongs and
+    /// exits via the `already-here` branch instead of redoing the move.
     fn focus_local_agent_pane(&self, pane: &str) {
-        let target_win = tmux::tmux_window_for_pane(pane);
-        let current_win = tmux::current_window();
+        let Some(target_win) = tmux::tmux_window_for_pane(pane) else {
+            // Can't resolve the target window — fall back to the plain
+            // select + switch-client pair so focus still works, albeit
+            // with the older flicker.
+            let _ = tmux::select_pane(pane);
+            let _ = tmux::focus_pane(pane);
+            return;
+        };
 
-        // Fast path (D): pane lives in the active window — no window switch
-        // needed. `select-pane` alone makes tmux focus the target pane.
-        if let (Some(t), Some(c)) = (target_win.as_deref(), current_win.as_deref())
-            && t == c
-        {
+        // Compare against *lonko's* window explicitly — using the client's
+        // "current window" misfires when lonko lives in one session and
+        // the user's client is on another (e.g. lonko-tray).
+        let lonko_win = self.state.own_pane
+            .as_deref()
+            .and_then(tmux::tmux_window_for_pane);
+
+        if lonko_win.as_deref() == Some(target_win.as_str()) {
             let _ = tmux::select_pane(pane);
             return;
         }
 
-        // Slow path (A): pre-move lonko into the target window so the
-        // sidebar is already there when the client switches.
-        if let (Some(own), Some(target)) = (self.state.own_pane.as_deref(), target_win.as_deref()) {
-            let lonko_win = tmux::tmux_window_for_pane(own);
-            if lonko_win.as_deref() != Some(target) {
-                write_no_follow_sentinel();
-                let _ = tmux::join_pane_right(own, target, 25);
-            }
+        if let Some(own) = self.state.own_pane.as_deref()
+            && !tmux::window_has_lonko_pane(&target_win)
+        {
+            write_no_follow_sentinel();
+            let _ = tmux::join_pane_right(own, &target_win, 25);
         }
 
         let _ = tmux::select_pane(pane);
