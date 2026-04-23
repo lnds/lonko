@@ -1,3 +1,9 @@
+## v0.17.1 (2026-04-23)
+
+### Perf
+
+- **focus**: pre-move lonko pane + skip unneeded switch-client (LONKO-55)
+
 ## v0.17.0 (2026-04-23)
 
 ### Feat
