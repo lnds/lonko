@@ -176,7 +176,15 @@ impl Session {
             self.context_max = context_max_for_model(&m);
             self.model = Some(m);
         }
-        if info.last_prompt.is_some()  { self.last_prompt  = info.last_prompt; }
+        // Preserve the hook-set last_prompt while the session is actively
+        // running. The UserPromptSubmit hook fires *before* Claude writes
+        // the new prompt to the transcript, so a transcript read during
+        // that window returns the previous prompt and silently rolls the
+        // card backwards. Once the session goes Idle/Completed, the
+        // transcript is authoritative again.
+        if info.last_prompt.is_some() && !self.status.is_active() {
+            self.last_prompt = info.last_prompt;
+        }
         if info.last_tool.is_some()    { self.last_tool    = info.last_tool; }
         if info.context_tokens > 0     { self.context_used = info.context_tokens as u32; }
         if info.branch.is_some()       { self.branch       = info.branch; }
@@ -1167,6 +1175,32 @@ mod tests {
         s.context_used = 500;
         s.apply_transcript_info(mk_info());
         assert_eq!(s.context_used, 500);
+    }
+
+    #[test]
+    fn apply_transcript_info_keeps_last_prompt_when_running() {
+        // Guards the race where UserPromptSubmit has set last_prompt to the
+        // newest prompt but Claude hasn't yet flushed it to the transcript.
+        let mut s = mk_session();
+        s.status = SessionStatus::Running;
+        s.last_prompt = Some("new hook prompt".into());
+        let mut info = mk_info();
+        info.last_prompt = Some("stale transcript prompt".into());
+        info.context_tokens = 42; // other fields should still merge
+        s.apply_transcript_info(info);
+        assert_eq!(s.last_prompt.as_deref(), Some("new hook prompt"));
+        assert_eq!(s.context_used, 42);
+    }
+
+    #[test]
+    fn apply_transcript_info_updates_last_prompt_when_idle() {
+        let mut s = mk_session();
+        s.status = SessionStatus::Idle;
+        s.last_prompt = Some("old".into());
+        let mut info = mk_info();
+        info.last_prompt = Some("transcript-latest".into());
+        s.apply_transcript_info(info);
+        assert_eq!(s.last_prompt.as_deref(), Some("transcript-latest"));
     }
 
     fn session_with(id: &str, pid: u32, pane: Option<&str>) -> Session {
