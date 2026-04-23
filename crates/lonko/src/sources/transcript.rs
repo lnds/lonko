@@ -34,6 +34,23 @@ fn clean_prompt(text: &str) -> String {
     }
 }
 
+/// `true` when a user-role text block is a runtime-injected message rather
+/// than a real prompt typed by the user. Claude Code slips these into the
+/// conversation as `type: "text"` user blocks, and without filtering they
+/// end up shown as the "last prompt" on the agent card.
+fn is_system_injected(text: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "<task-notification>",
+        "<system-reminder>",
+        "<user-prompt-submit-hook>",
+        "<bash-",            // <bash-input>, <bash-stdout>, <bash-stderr>
+        "<local-command-",   // <local-command-stdout>, <local-command-stderr>
+        "Base directory",    // initial system message from Claude Code
+        "Caveat: The messages below were generated",
+    ];
+    PREFIXES.iter().any(|p| text.starts_with(p))
+}
+
 fn extract_tag<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
     let open  = format!("<{}>", tag);
     let close = format!("</{}>", tag);
@@ -130,15 +147,16 @@ pub fn read_latest(path: &Path) -> Option<TranscriptInfo> {
             "user" => {
                 let content = &val["message"]["content"];
                 if let Some(text) = content.as_str() {
-                    if !text.is_empty() {
-                        last_prompt = Some(clean_prompt(text.trim()));
+                    let text = text.trim();
+                    if !text.is_empty() && !is_system_injected(text) {
+                        last_prompt = Some(clean_prompt(text));
                     }
                 } else if let Some(blocks) = content.as_array() {
                     for block in blocks {
                         if block["type"] == "text"
                             && let Some(text) = block["text"].as_str() {
                                 let text = text.trim();
-                                if !text.is_empty() && !text.starts_with("Base directory") {
+                                if !text.is_empty() && !is_system_injected(text) {
                                     last_prompt = Some(clean_prompt(text));
                                 }
                             }
@@ -156,4 +174,52 @@ pub fn read_latest(path: &Path) -> Option<TranscriptInfo> {
         last_tool,
         context_tokens,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_system_injected_flags_task_notification() {
+        assert!(is_system_injected("<task-notification>\n<task-id>abc</task-id></task-notification>"));
+    }
+
+    #[test]
+    fn is_system_injected_flags_system_reminder() {
+        assert!(is_system_injected("<system-reminder>something</system-reminder>"));
+    }
+
+    #[test]
+    fn is_system_injected_flags_bash_io_blocks() {
+        assert!(is_system_injected("<bash-input>ls -la</bash-input>"));
+        assert!(is_system_injected("<bash-stdout>total 0</bash-stdout>"));
+    }
+
+    #[test]
+    fn is_system_injected_flags_hook_envelope() {
+        assert!(is_system_injected("<user-prompt-submit-hook>...</user-prompt-submit-hook>"));
+    }
+
+    #[test]
+    fn is_system_injected_flags_base_directory() {
+        assert!(is_system_injected("Base directory: /tmp/x"));
+    }
+
+    #[test]
+    fn is_system_injected_passes_real_prompt() {
+        assert!(!is_system_injected("hacer X"));
+        assert!(!is_system_injected("<command-name>/skill</command-name><command-message>arg</command-message>"));
+    }
+
+    #[test]
+    fn clean_prompt_extracts_slash_command() {
+        let raw = "<command-message>arg</command-message><command-name>/skill</command-name>";
+        assert_eq!(clean_prompt(raw), "/skill arg");
+    }
+
+    #[test]
+    fn clean_prompt_strips_tags_for_plain_text() {
+        assert_eq!(clean_prompt("<foo>bar</foo>baz"), "barbaz");
+    }
 }
