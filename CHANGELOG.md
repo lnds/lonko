@@ -1,3 +1,9 @@
+## v0.16.2 (2026-04-22)
+
+### Fix
+
+- **state**: don't let stale transcript reads clobber fresh prompt
+
 ## v0.16.1 (2026-04-22)
 
 ### Fix
