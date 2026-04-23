@@ -52,6 +52,7 @@ pub fn render(frame: &mut Frame) {
         key_line("g", "Worktree (Agents)"),
         key_line("p", "PR worktree (Agents)"),
         key_line("n", "New agent (Agents)"),
+        key_line("e", "Expand subagents"),
         key_line("x", "Kill + remove wt"),
         key_line("X", "Kill agent"),
         Line::raw(""),

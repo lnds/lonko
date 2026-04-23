@@ -341,6 +341,9 @@ pub struct AppState {
     /// Repo-root keys of groups that are collapsed in the Agents tab.
     /// When collapsed, only a summary header is shown instead of all cards.
     pub collapsed_groups: HashSet<String>,
+    /// Parent session IDs whose subagents are currently expanded inline.
+    /// Ephemeral — not persisted across restarts. Toggled by `e`.
+    pub expanded_subagents: HashSet<String>,
     /// Remote Tailnet hosts and their tmux sessions (for the Remote tab).
     pub remote_hosts: Vec<RemoteHost>,
     /// Selected index in the flattened Remote tab list.
@@ -484,6 +487,7 @@ impl Default for AppState {
             new_agent_resolved_cwd: String::new(),
             new_agent_focus: NewAgentField::default(),
             collapsed_groups: HashSet::new(),
+            expanded_subagents: HashSet::new(),
             remote_hosts: vec![],
             remote_selected: 0,
             excluded_hosts: HashSet::new(),
@@ -517,20 +521,39 @@ impl AppState {
 
         // Collapsed groups: keep only the first session as a placeholder
         // so the header still renders and is selectable for toggling.
-        if self.collapsed_groups.is_empty() {
-            return sorted;
+        let after_groups: Vec<&Session> = if self.collapsed_groups.is_empty() {
+            sorted
+        } else {
+            let mut seen: HashSet<&str> = HashSet::new();
+            sorted
+                .into_iter()
+                .filter(|s| {
+                    if let Some(repo) = s.repo_root.as_deref()
+                        && self.collapsed_groups.contains(repo) {
+                            return seen.insert(repo);
+                        }
+                    true
+                })
+                .collect()
+        };
+
+        // Inline-expand subagents of parents the user asked to open with `e`.
+        // Keeps mains in the sorted order and splices their subs right after
+        // so the visual hierarchy stays obvious.
+        if self.expanded_subagents.is_empty() {
+            return after_groups;
         }
-        let mut seen: HashSet<&str> = HashSet::new();
-        sorted
-            .into_iter()
-            .filter(|s| {
-                if let Some(repo) = s.repo_root.as_deref()
-                    && self.collapsed_groups.contains(repo) {
-                        return seen.insert(repo);
-                    }
-                true
-            })
-            .collect()
+        let mut result: Vec<&Session> = Vec::with_capacity(after_groups.len());
+        for s in after_groups {
+            result.push(s);
+            if !self.expanded_subagents.contains(&s.id) { continue; }
+            for sub in self.sessions.iter()
+                .filter(|sub| sub.parent_id.as_deref() == Some(s.id.as_str()))
+            {
+                result.push(sub);
+            }
+        }
+        result
     }
 
     /// All sessions in canonical display order (grouped by repo, trunk first)
@@ -599,6 +622,13 @@ impl AppState {
     pub fn toggle_group_collapse(&mut self, repo_root: &str) {
         if !self.collapsed_groups.remove(repo_root) {
             self.collapsed_groups.insert(repo_root.to_string());
+        }
+    }
+
+    /// Toggle inline expansion of a parent session's subagents.
+    pub fn toggle_subagent_expand(&mut self, parent_id: &str) {
+        if !self.expanded_subagents.remove(parent_id) {
+            self.expanded_subagents.insert(parent_id.to_string());
         }
     }
 
@@ -1384,6 +1414,43 @@ mod tests {
         assert_eq!(ids, vec!["b1", "a1"]);
         assert_eq!(state.subagent_count_for("a1"), 1);
         assert_eq!(state.subagent_count_for("b1"), 0);
+    }
+
+    #[test]
+    fn visible_sessions_inlines_subagents_when_parent_expanded() {
+        let mut state = AppState::default();
+        let mut a1 = main_with_repo("a1", Some("/r/alpha"));
+        a1.last_activity = Instant::now();
+        let mut b1 = main_with_repo("b1", Some("/r/beta"));
+        b1.last_activity = Instant::now();
+        let mut sub_x = Session::new("sx".into(), 0, "/tmp/a1".into());
+        sub_x.parent_id = Some("a1".into());
+        sub_x.depth = 1;
+        sub_x.repo_root = Some("/r/alpha".into());
+        let mut sub_y = Session::new("sy".into(), 0, "/tmp/a1".into());
+        sub_y.parent_id = Some("a1".into());
+        sub_y.depth = 1;
+        sub_y.repo_root = Some("/r/alpha".into());
+        state.sessions = vec![b1, sub_y, a1, sub_x];
+
+        // Nothing expanded → subagents hidden, only mains visible.
+        let ids: Vec<&str> = state.visible_sessions().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["b1", "a1"]);
+
+        // Expanding a1 splices its subagents right after it.
+        state.toggle_subagent_expand("a1");
+        let ids: Vec<&str> = state.visible_sessions().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["b1", "a1", "sy", "sx"]);
+
+        // Expanding b1 has no effect (it has no subagents).
+        state.toggle_subagent_expand("b1");
+        let ids: Vec<&str> = state.visible_sessions().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["b1", "a1", "sy", "sx"]);
+
+        // Toggling a1 back collapses the subagents.
+        state.toggle_subagent_expand("a1");
+        let ids: Vec<&str> = state.visible_sessions().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["b1", "a1"]);
     }
 
     #[test]

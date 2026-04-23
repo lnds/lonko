@@ -1639,6 +1639,17 @@ impl App {
             KeyCode::Char('p') if self.state.active_tab == Tab::Agents => {
                 self.spawn_pr_worktree();
             }
+            KeyCode::Char('e') if self.state.active_tab == Tab::Agents => {
+                // Expand / collapse subagents inline under the selected main.
+                // No-op on subagent cards (you can only toggle from the parent).
+                if let Some(s) = self.state.selected_session()
+                    && !s.is_subagent()
+                    && self.state.subagent_count_for(&s.id) > 0
+                {
+                    let parent_id = s.id.clone();
+                    self.state.toggle_subagent_expand(&parent_id);
+                }
+            }
             // Permission shortcuts (y=yes/1, w=always/2, n=no/3)
             KeyCode::Char('y') => self.send_permission("1"),
             KeyCode::Char('w') => self.send_permission("2"),

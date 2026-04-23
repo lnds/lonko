@@ -99,13 +99,17 @@ fn session_color(position: usize) -> Color {
 
 // Each card: 5 content lines + 1 separator line (last card has no separator)
 const CARD_HEIGHT: u16 = 5;
+const SUBAGENT_CARD_HEIGHT: u16 = 2;
 const SEP_HEIGHT: u16 = 1;
 /// One-line group header drawn above the first card of a multi-agent group.
 pub(crate) const GROUP_HEADER_HEIGHT: u16 = 1;
 
 /// Card height for a session: 5 lines (6 when a bookmark note is shown).
+/// Inline-expanded subagent rows are compact — 2 lines.
 pub(crate) fn card_height(session: &Session, bookmarks: &HashMap<String, String>) -> u16 {
-    if bookmarks.contains_key(&session.cwd) {
+    if session.is_subagent() {
+        SUBAGENT_CARD_HEIGHT
+    } else if bookmarks.contains_key(&session.cwd) {
         CARD_HEIGHT + 1
     } else {
         CARD_HEIGHT
@@ -445,9 +449,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             None
         };
         let subagent_count = state.subagent_count_for(&session.id);
+        let subagents_expanded = state.expanded_subagents.contains(&session.id);
         render_session_card(frame, chunks[chunk_idx], session, CardCtx {
             selected, focused, tick: state.tick, position, icon, bookmark_note,
-            worktree_input, bookmark_input, subagent_count,
+            worktree_input, bookmark_input, subagent_count, subagents_expanded,
         });
     }
 
@@ -478,10 +483,17 @@ struct CardCtx<'a> {
     /// next to the status label so subagents stay discoverable without
     /// inflating the list with per-sub cards.
     subagent_count: usize,
+    /// Whether the user has expanded this agent's subagents inline below.
+    /// Flips the badge glyph so the toggle direction is visible.
+    subagents_expanded: bool,
 }
 
 fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: CardCtx<'_>) {
-    let CardCtx { selected, focused, tick, position, icon, bookmark_note, worktree_input, bookmark_input, subagent_count } = ctx;
+    let CardCtx { selected, focused, tick, position, icon, bookmark_note, worktree_input, bookmark_input, subagent_count, subagents_expanded } = ctx;
+    if session.is_subagent() {
+        render_subagent_row(frame, area, session, selected, focused);
+        return;
+    }
     // Remote agents get the shared purple SSH accent so they stand out from
     // local ones at a glance (and match the Remote-tab palette). Local
     // agents keep their per-slot palette color for mutual distinction.
@@ -692,8 +704,9 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
         ),
     ];
     if subagent_count > 0 {
+        let arrow = if subagents_expanded { "⇡" } else { "⇣" };
         status_spans.push(Span::styled(
-            format!("  ⇣{subagent_count}"),
+            format!("  {arrow}{subagent_count}"),
             Style::default().fg(SUBTLE),
         ));
     }
@@ -777,6 +790,78 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
 
     let paragraph = Paragraph::new(content).block(block);
     frame.render_widget(paragraph, area);
+}
+
+/// Render a compact 2-line subagent row inlined under its parent. Indented
+/// with `└` so the parent/child relationship is visible at a glance. No
+/// borders, no model/cost/ctx — those are parent-scoped. Just the status
+/// icon, the agent-type name, and the last prompt/tool for context.
+fn render_subagent_row(
+    frame: &mut Frame,
+    area: Rect,
+    session: &Session,
+    selected: bool,
+    focused: bool,
+) {
+    let status_color = status_color(&session.status);
+    let name = if session.project_name.is_empty() {
+        session.display_name()
+    } else {
+        session.project_name.as_str()
+    };
+
+    let name_style = if focused {
+        Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
+    } else if selected {
+        Style::default().fg(TEXT)
+    } else {
+        Style::default().fg(SUBTLE)
+    };
+
+    let width = area.width as usize;
+    let indent = "  └ ";
+    let indent_cols = UnicodeWidthStr::width(indent);
+    let status_label = session.status.label();
+    let status_cols = UnicodeWidthStr::width(status_label.as_str());
+    let name_budget = width
+        .saturating_sub(indent_cols + status_cols + 3); // space + ·  + margin
+    let name_text = truncate_cols(name, name_budget.max(1));
+
+    let line1 = Line::from(vec![
+        Span::styled(indent.to_string(), Style::default().fg(DIM)),
+        Span::styled(status_label.to_string(), Style::default().fg(status_color)),
+        Span::raw("  "),
+        Span::styled(name_text, name_style),
+    ]);
+
+    // Line 2: last prompt (preferred) or last tool, truncated.
+    let context = session
+        .last_prompt
+        .as_deref()
+        .or(session.last_tool.as_deref())
+        .unwrap_or("—");
+    let context_budget = width.saturating_sub(indent_cols + 2);
+    let context_text = truncate_cols(context, context_budget.max(1));
+    let line2 = Line::from(vec![
+        Span::raw(" ".repeat(indent_cols)),
+        Span::styled(context_text, Style::default().fg(DIM)),
+    ]);
+
+    let bg = if selected { NAV_BG } else { Color::Reset };
+    let paragraph = Paragraph::new(vec![line1, line2])
+        .style(Style::default().bg(bg));
+    frame.render_widget(paragraph, area);
+}
+
+fn status_color(status: &SessionStatus) -> Color {
+    match status {
+        SessionStatus::WaitingForUser(_) => ORANGE,
+        SessionStatus::WaitingForInput => YELLOW,
+        SessionStatus::Running | SessionStatus::RunningTool(_) => GREEN,
+        SessionStatus::Idle => BLUE,
+        SessionStatus::Completed => TEAL,
+        _ => DIM,
+    }
 }
 
 /// Render a one-line group header above the first card of a multi-agent
