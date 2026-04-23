@@ -93,6 +93,7 @@ cache directory (`~/Library/Caches/` on macOS, `~/.cache/` on Linux):
 |---|---|
 | `lonko-focus-pane` | Pane ID for auto-selection on startup |
 | `lonko-no-follow` | Sentinel: lonko navigated intentionally, skip follow |
+| `lonko-follow-debug` | Flag file: when present, `lonko-follow.sh` traces to `/tmp/lonko-follow.log` |
 | `lonko-sessions` | Pane IDs per line (for `lonko focus N`) |
 | `lonko-sessions-info` | Session list, tab-separated (N, name, cwd) |
 | `lonko-layouts/<id>.layout` | Saved window layouts, keyed by window ID |

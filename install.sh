@@ -26,7 +26,7 @@ cat > "$TMUX_CONFIG" <<'TMUX_EOF'
 # Source this file from your tmux.conf (after any global hooks):
 #   if-shell "[ -f ~/.config/tmux/lonko.conf ]" "source-file ~/.config/tmux/lonko.conf"
 
-# Auto-follow lonko between windows/sessions
+# Auto-follow lonko between windows/sessions.
 set-hook -ga client-session-changed 'run-shell "~/.config/tmux/scripts/lonko-follow.sh"'
 set-hook -ga after-select-window    'run-shell "~/.config/tmux/scripts/lonko-follow.sh"'
 

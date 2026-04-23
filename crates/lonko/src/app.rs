@@ -30,6 +30,21 @@ pub fn write_no_follow_sentinel() {
     let _ = std::fs::write(&sentinel, "");
 }
 
+/// Rewrite the no-follow sentinel over ~200 ms so the second of the two hooks
+/// `switch-client` fires (`client-session-changed` then `after-select-window`)
+/// still sees it after the first invocation consumes it. Short by design: a
+/// longer window would silently suppress legitimate follows the user triggers
+/// immediately afterwards. Requires a Tokio runtime; all current callers run
+/// inside the event loop.
+fn refresh_no_follow_sentinel_async() {
+    tokio::spawn(async move {
+        for delay_ms in [30u64, 60, 100] {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            write_no_follow_sentinel();
+        }
+    });
+}
+
 /// Map a hook event name to a SessionStatus update.
 /// Returns `None` for unknown events (caller should leave status unchanged).
 pub fn hook_event_to_status(
@@ -106,13 +121,16 @@ pub fn attach_remote_agent(host: &str, pane_id: &str) {
     let local_session = format!("remote/{short}");
     ensure_remote_host_session(host, &local_session);
 
-    // The upcoming `switch-client` fires `client-session-changed`, which
-    // the tmux follow hook would otherwise react to by killing and
-    // respawning lonko in the new session. That restart empties the
-    // Agents list and remote agents only come back after the bridges
-    // re-establish (several seconds). The sentinel tells the follow
-    // script that lonko navigated intentionally — skip this round.
+    // Suppress the follow hook for this switch-client: the `remote/<host>`
+    // wrapper session already contains a nested lonko (via the ssh attach),
+    // so moving the local lonko into it would stack two panels in the same
+    // window. The `remote/*` guard in lonko-follow.sh covers this, and the
+    // sentinel is an extra belt-and-suspenders defense against the guard
+    // missing a hook due to timing. Rewrite the sentinel across a short
+    // window so the second hook (`after-select-window` after
+    // `client-session-changed`) still sees it.
     write_no_follow_sentinel();
+    refresh_no_follow_sentinel_async();
     let _ = std::process::Command::new("tmux")
         .args(["switch-client", "-t", &local_session])
         .status();
@@ -423,25 +441,19 @@ impl App {
                         s.tmux_pane = Some(p.clone());
                     }
                     self.state.focused_session_id = Some(session_id);
-                    // Repeat select-pane for 300ms to beat tmux mouse-mode.
-                    // Every MouseUp/MouseDown re-selects lonko; we overwrite it
-                    // repeatedly until there are no more pending mouse events.
-                    //
-                    // The sentinel is rewritten before every iteration so
-                    // the follow script skips each `switch-client`-triggered
-                    // `client-session-changed` / `after-select-window` hook
-                    // firing. Without this, lonko gets killed and respawned
-                    // on the first hook, and remote agents disappear for
-                    // several seconds until bridges re-establish.
+                    // Repeat select-pane for 300ms to beat tmux mouse-mode:
+                    // every MouseUp/MouseDown re-selects lonko, so we
+                    // overwrite that repeatedly until pending mouse events
+                    // drain. The follow script uses `join-pane`, which
+                    // preserves lonko's process across window moves, so
+                    // there's no need to suppress it here.
                     use std::sync::atomic::Ordering;
                     let my_gen = self.focus_gen.fetch_add(1, Ordering::SeqCst) + 1;
                     let gen_arc = self.focus_gen.clone();
-                    write_no_follow_sentinel();
                     tokio::spawn(async move {
                         for delay_ms in [30u64, 60, 100, 160, 240] {
                             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                             if gen_arc.load(Ordering::SeqCst) != my_gen { break; }
-                            write_no_follow_sentinel();
                             let _ = tmux::select_pane(&p);
                             let _ = tmux::focus_pane(&p);
                         }
@@ -598,6 +610,7 @@ impl App {
         // See `attach_remote_agent`: suppress the follow script so lonko
         // stays put when we switch-client into `remote/<host>`.
         write_no_follow_sentinel();
+        refresh_no_follow_sentinel_async();
         let _ = std::process::Command::new("tmux")
             .args(["switch-client", "-t", &local_session])
             .status();
@@ -704,7 +717,6 @@ impl App {
             if let Some(s) = self.state.sessions.iter_mut().find(|s| s.id == session_id) {
                 s.tmux_pane = Some(pane.clone());
             }
-            write_no_follow_sentinel();
             let _ = tmux::select_pane(pane);
             let _ = tmux::focus_pane(pane);
             self.state.focused_session_id = Some(session_id);
@@ -1917,7 +1929,6 @@ impl App {
             self.state.selected = vis.iter()
                 .position(|s| s.id == session_id)
                 .unwrap_or(0);
-            write_no_follow_sentinel();
             let _ = tmux::select_pane(pane);
             let _ = tmux::focus_pane(pane);
             self.state.focused_session_id = Some(session_id);
