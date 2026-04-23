@@ -1,3 +1,9 @@
+## v0.16.3 (2026-04-22)
+
+### Fix
+
+- **transcript**: ignore runtime-injected user blocks for last_prompt
+
 ## v0.16.2 (2026-04-22)
 
 ### Fix
