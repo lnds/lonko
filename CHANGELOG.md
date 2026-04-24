@@ -1,3 +1,9 @@
+## v0.18.1 (2026-04-24)
+
+### Fix
+
+- **scripts**: run lonko as pane command so Ctrl-C closes the panel
+
 ## v0.18.0 (2026-04-24)
 
 ### Feat
