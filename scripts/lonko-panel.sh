@@ -38,10 +38,13 @@ TRAY_PANE=$(tmux list-panes -aF "#{pane_id} #{pane_current_command}" \
     | awk '$2 == "lonko" {print $1}' | head -1)
 
 if [ -z "$TRAY_PANE" ]; then
-    # No lonko running anywhere — start a fresh one inside lonko-tray
-    tmux has-session -t lonko-tray 2>/dev/null \
-        || tmux new-session -d -s lonko-tray
-    tmux send-keys -t lonko-tray: "lonko" Enter
+    # No lonko running anywhere — start a fresh tray session whose sole
+    # pane runs `lonko` directly (no intermediate shell). Exiting lonko
+    # with Ctrl-C must close the pane instead of dropping to a prompt,
+    # which requires the command to be the pane's foreground process —
+    # not a child of the default shell (LONKO-??).
+    tmux kill-session -t lonko-tray 2>/dev/null
+    tmux new-session -d -s lonko-tray "lonko"
     # Wait for lonko to start (may take >500ms on first launch)
     for _try in 1 2 3 4 5; do
         sleep 0.3
