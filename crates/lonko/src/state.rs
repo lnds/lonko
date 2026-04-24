@@ -354,6 +354,47 @@ pub struct AppState {
     pub remote_enabled: bool,
     /// Remote poll interval in ticks (poll_interval_secs * 10).
     pub remote_poll_ticks: u64,
+    /// PR picker (triggered by `p` in the Agents tab): a modal that lists
+    /// open PRs for the repo of the selected agent so the user can pick
+    /// one to review in a fresh worktree.
+    pub pr_picker_mode: bool,
+    /// Filter query applied to the PR picker list (substring, case-insensitive,
+    /// matched against number, title, author and branch).
+    pub pr_picker_query: String,
+    /// Whether the background `gh pr list` call is still in flight.
+    pub pr_picker_loading: bool,
+    /// Error message from the last `gh pr list` call, if any.
+    pub pr_picker_error: Option<String>,
+    /// The cwd used for the current picker fetch (so we route the worktree
+    /// creation to the same repo).
+    pub pr_picker_cwd: Option<String>,
+    /// Open PRs returned by `gh`, in the order they came back.
+    pub pr_picker_prs: Vec<PrPickItem>,
+    /// Selected index in the **filtered** picker list.
+    pub pr_picker_selected: usize,
+}
+
+/// One row in the PR picker list. Mirrors the subset of `gh pr list --json`
+/// fields we render. `updated_at` is the raw ISO-8601 string from gh; the UI
+/// converts it to a relative label at render time.
+#[derive(Debug, Clone)]
+pub struct PrPickItem {
+    pub number: u32,
+    pub title: String,
+    pub branch: String,
+    pub author: String,
+    pub updated_at: String,
+}
+
+/// Everything the caller needs to spawn a worktree after the user confirms
+/// a PR in the picker. Returning this struct (rather than a bare number)
+/// keeps the spawn site decoupled from `AppState` once the picker has been
+/// cleared.
+#[derive(Debug, Clone)]
+pub struct PrPickerSubmit {
+    pub cwd: String,
+    pub number: u32,
+    pub title: String,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
@@ -493,6 +534,13 @@ impl Default for AppState {
             excluded_hosts: HashSet::new(),
             remote_enabled: false,
             remote_poll_ticks: 100, // 10s default
+            pr_picker_mode: false,
+            pr_picker_query: String::new(),
+            pr_picker_loading: false,
+            pr_picker_error: None,
+            pr_picker_cwd: None,
+            pr_picker_prs: vec![],
+            pr_picker_selected: 0,
         }
     }
 }
@@ -577,15 +625,31 @@ impl AppState {
     /// Subagents are intentionally excluded from the rendered list — they
     /// surface as a count badge on their parent card instead, since per-sub
     /// cards added too much noise to the agents list (LONKO-26).
+    ///
+    /// Local mains (host = None) come first in first-seen repo-root order;
+    /// remote mains (host = Some) follow, ordered deterministically by
+    /// (host, repo_root) so that reconnecting a tailnet peer or re-seeding
+    /// a provisional remote agent doesn't shuffle the section.
     fn sort_sessions(sessions: Vec<&Session>) -> Vec<&Session> {
-        let mains: Vec<&Session> = sessions.iter().copied().filter(|s| s.depth == 0).collect();
+        let (local_mains, remote_mains): (Vec<&Session>, Vec<&Session>) = sessions
+            .iter()
+            .copied()
+            .filter(|s| s.depth == 0)
+            .partition(|s| s.host.is_none());
 
-        // Linear-scan grouping: preserves first-seen order of keys, and the
-        // insertion order of mains within each key. `None` (non-git mains,
-        // rare in practice because app.rs falls back to cwd) always lands
-        // in the tail bucket so named repos stay on top.
-        let mut named: Vec<(Option<&str>, Vec<&Session>)> = Vec::new();
-        let mut ungrouped: Vec<&Session> = Vec::new();
+        let mut result: Vec<&Session> = Vec::with_capacity(local_mains.len() + remote_mains.len());
+        result.extend(Self::group_locals(local_mains));
+        result.extend(Self::group_remotes(remote_mains));
+        result
+    }
+
+    /// Cluster local mains by `repo_root`, preserving first-seen order of
+    /// keys (so the list doesn't jitter as hooks arrive). Within each
+    /// group, sort by the composite key (trunk first, then branch, cwd,
+    /// pane). Mains with no `repo_root` fall into a trailing bucket.
+    fn group_locals<'a>(mains: Vec<&'a Session>) -> Vec<&'a Session> {
+        let mut named: Vec<(Option<&str>, Vec<&'a Session>)> = Vec::new();
+        let mut ungrouped: Vec<&'a Session> = Vec::new();
         for m in &mains {
             match m.repo_root.as_deref() {
                 None => ungrouped.push(*m),
@@ -601,18 +665,41 @@ impl AppState {
         if !ungrouped.is_empty() {
             named.push((None, ungrouped));
         }
-
-        // Within each group, order by a stable composite key so the list
-        // does not shuffle as hooks arrive or transcripts get re-read.
-        // Priority: trunk first, then branch name (case-insensitive),
-        // then cwd, then tmux pane as a unique fallback for cases where
-        // two agents share the same worktree and branch.
         for (_, group_mains) in named.iter_mut() {
             group_mains.sort_by_key(|s| group_sort_key(s));
         }
-
         let mut result: Vec<&Session> = Vec::with_capacity(mains.len());
         for (_, group_mains) in &named {
+            result.extend(group_mains.iter().copied());
+        }
+        result
+    }
+
+    /// Cluster remote mains by `(host, repo_root)` in alphabetical order
+    /// so the remote section stays stable across reconnects and re-seeds.
+    /// Within each group the composite key still applies.
+    fn group_remotes<'a>(mains: Vec<&'a Session>) -> Vec<&'a Session> {
+        type RemoteGroup<'a> = (&'a str, Option<&'a str>, Vec<&'a Session>);
+        let mut named: Vec<RemoteGroup<'a>> = Vec::new();
+        for m in &mains {
+            let host = m.host.as_deref().unwrap_or("");
+            let repo = m.repo_root.as_deref();
+            if let Some(entry) = named.iter_mut().find(|(h, r, _)| *h == host && *r == repo) {
+                entry.2.push(*m);
+            } else {
+                named.push((host, repo, vec![*m]));
+            }
+        }
+        named.sort_by(|a, b| {
+            a.0.to_ascii_lowercase()
+                .cmp(&b.0.to_ascii_lowercase())
+                .then_with(|| a.1.unwrap_or("").cmp(b.1.unwrap_or("")))
+        });
+        for (_, _, group_mains) in named.iter_mut() {
+            group_mains.sort_by_key(|s| group_sort_key(s));
+        }
+        let mut result: Vec<&Session> = Vec::with_capacity(mains.len());
+        for (_, _, group_mains) in &named {
             result.extend(group_mains.iter().copied());
         }
         result
@@ -738,6 +825,55 @@ impl AppState {
                 self.clamp_selected();
             }
         }
+    }
+
+    /// Reconcile the agent list against a fresh snapshot of panes on a
+    /// remote host. Any session whose `host` matches and whose `tmux_pane`
+    /// is *not* in `live_panes` is treated the same way `handle_pane_gone`
+    /// treats a local pane that vanished: active sessions are marked
+    /// `Completed` so they fade out, already-completed ones are evicted.
+    ///
+    /// Without this step, provisional agents seeded by an earlier snapshot
+    /// would linger forever after the user killed the remote Claude pane,
+    /// producing phantom cards like the triple `shinkansen-monorail`
+    /// screenshot in LONKO-??.
+    pub fn reconcile_remote_panes(
+        &mut self,
+        host: &str,
+        live_panes: &std::collections::HashSet<&str>,
+    ) {
+        let dead: Vec<usize> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                if s.host.as_deref() != Some(host) {
+                    return None;
+                }
+                let pane = s.tmux_pane.as_deref()?;
+                if live_panes.contains(pane) {
+                    return None;
+                }
+                Some(i)
+            })
+            .collect();
+        for i in dead.into_iter().rev() {
+            let session = &mut self.sessions[i];
+            match session.status {
+                SessionStatus::Running
+                | SessionStatus::RunningTool(_)
+                | SessionStatus::WaitingForUser(_)
+                | SessionStatus::WaitingForInput
+                | SessionStatus::Idle => {
+                    session.completed_at = Some(Instant::now());
+                    session.status = SessionStatus::Completed;
+                }
+                _ => {
+                    self.sessions.remove(i);
+                }
+            }
+        }
+        self.clamp_selected();
     }
 
     /// Drop sessions that have been completed for longer than `ttl_secs`.
@@ -896,6 +1032,104 @@ impl AppState {
             _ => {}
         }
         None
+    }
+
+    /// Apply a key to the PR picker. Returns `Some(PrPickerSubmit)` when the
+    /// user pressed Enter on a valid row — the caller is expected to kick
+    /// off the worktree creation for that PR. The picker state is cleared
+    /// before returning so callers don't have to. Navigation, filter edits
+    /// and cancels are resolved in-place on `AppState`.
+    pub fn apply_pr_picker_key(
+        &mut self,
+        code: crossterm::event::KeyCode,
+        ctrl: bool,
+    ) -> Option<PrPickerSubmit> {
+        use crossterm::event::KeyCode;
+        match code {
+            KeyCode::Esc => {
+                self.clear_pr_picker();
+            }
+            KeyCode::Char('c') if ctrl => {
+                self.clear_pr_picker();
+            }
+            KeyCode::Enter => {
+                if let Some(pr) = self.selected_pr_picker_item() {
+                    let submit = PrPickerSubmit {
+                        cwd: self.pr_picker_cwd.clone().unwrap_or_default(),
+                        number: pr.number,
+                        title: pr.title.clone(),
+                    };
+                    self.clear_pr_picker();
+                    return Some(submit);
+                }
+            }
+            KeyCode::Up => { self.navigate_pr_picker(-1); }
+            KeyCode::Down => { self.navigate_pr_picker(1); }
+            KeyCode::Char('p') if ctrl => { self.navigate_pr_picker(-1); }
+            KeyCode::Char('n') if ctrl => { self.navigate_pr_picker(1); }
+            KeyCode::Backspace => {
+                self.pr_picker_query.pop();
+                self.pr_picker_selected = 0;
+            }
+            KeyCode::Char(c) => {
+                self.pr_picker_query.push(c);
+                self.pr_picker_selected = 0;
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Reset picker state back to closed.
+    pub fn clear_pr_picker(&mut self) {
+        self.pr_picker_mode = false;
+        self.pr_picker_query.clear();
+        self.pr_picker_loading = false;
+        self.pr_picker_error = None;
+        self.pr_picker_cwd = None;
+        self.pr_picker_prs.clear();
+        self.pr_picker_selected = 0;
+    }
+
+    /// Substring-match the query against each PR's number, title, branch
+    /// and author. Empty query returns all PRs in insertion order.
+    pub fn filtered_pr_picker(&self) -> Vec<&PrPickItem> {
+        if self.pr_picker_query.is_empty() {
+            return self.pr_picker_prs.iter().collect();
+        }
+        let q = self.pr_picker_query.to_lowercase();
+        self.pr_picker_prs
+            .iter()
+            .filter(|p| {
+                p.number.to_string().contains(&q)
+                    || p.title.to_lowercase().contains(&q)
+                    || p.branch.to_lowercase().contains(&q)
+                    || p.author.to_lowercase().contains(&q)
+            })
+            .collect()
+    }
+
+    /// Clamp and move the picker selection cursor by `delta`. The cursor
+    /// indexes into the **filtered** list so it stays consistent as the
+    /// user narrows the query.
+    pub fn navigate_pr_picker(&mut self, delta: isize) {
+        let len = self.filtered_pr_picker().len();
+        if len == 0 {
+            self.pr_picker_selected = 0;
+            return;
+        }
+        let max = len - 1;
+        if delta > 0 {
+            self.pr_picker_selected = (self.pr_picker_selected + 1).min(max);
+        } else {
+            self.pr_picker_selected = self.pr_picker_selected.saturating_sub(1);
+        }
+    }
+
+    /// Returns the currently selected PR in the filtered list, or `None`
+    /// when the list is empty.
+    pub fn selected_pr_picker_item(&self) -> Option<&PrPickItem> {
+        self.filtered_pr_picker().into_iter().nth(self.pr_picker_selected)
     }
 
     /// Open the new-agent popup. If `cwd` is non-empty, the Dir field
@@ -1388,6 +1622,244 @@ mod tests {
             .map(|s| s.id.as_str())
             .collect();
         assert_eq!(ids, vec!["a1", "n1", "n2"]);
+    }
+
+    fn remote_main(id: &str, host: &str, repo: &str, branch: &str) -> Session {
+        let mut s = main_with_repo_branch(id, repo, branch);
+        s.host = Some(host.into());
+        s
+    }
+
+    #[test]
+    fn visible_sessions_places_remote_agents_after_local() {
+        let mut state = AppState::default();
+        // Remote inserted before local should still land at the bottom.
+        state.sessions = vec![
+            remote_main("r1", "nyx", "/remote/alpha", "main"),
+            main_with_repo_branch("local1", "/r/alpha", "main"),
+            main_with_repo_branch("local2", "/r/alpha", "feat-a"),
+        ];
+        let ids: Vec<&str> = state
+            .visible_sessions()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["local1", "local2", "r1"]);
+    }
+
+    #[test]
+    fn visible_sessions_orders_remotes_deterministically_by_host() {
+        let mut state = AppState::default();
+        // Insert in non-alphabetical host order; result must come back sorted.
+        state.sessions = vec![
+            remote_main("r_zeus_a", "zeus", "/remote/foo", "main"),
+            remote_main("r_nyx_a", "nyx", "/remote/foo", "main"),
+            remote_main("r_apollo_a", "apollo", "/remote/foo", "main"),
+        ];
+        let ids: Vec<&str> = state
+            .visible_sessions()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["r_apollo_a", "r_nyx_a", "r_zeus_a"]);
+    }
+
+    #[test]
+    fn visible_sessions_remote_order_stable_on_reinsertion() {
+        // Simulates a provisional remote agent being re-seeded: the insertion
+        // order changes but the final order must not.
+        let mut state = AppState::default();
+        state.sessions = vec![
+            remote_main("a", "nyx", "/remote/a", "main"),
+            remote_main("b", "zeus", "/remote/b", "main"),
+        ];
+        let ids1: Vec<String> = state
+            .visible_sessions()
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
+        state.sessions = vec![
+            remote_main("b", "zeus", "/remote/b", "main"),
+            remote_main("a", "nyx", "/remote/a", "main"),
+        ];
+        let ids2: Vec<String> = state
+            .visible_sessions()
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
+        assert_eq!(ids1, ids2);
+        assert_eq!(ids1, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    fn mk_pr(n: u32, title: &str, branch: &str, author: &str) -> PrPickItem {
+        PrPickItem {
+            number: n,
+            title: title.into(),
+            branch: branch.into(),
+            author: author.into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    fn remote_session(id: &str, host: &str, pane: &str, status: SessionStatus) -> Session {
+        let mut s = Session::new(id.into(), 0, format!("/remote/{host}/{id}"));
+        s.host = Some(host.into());
+        s.tmux_pane = Some(pane.into());
+        s.status = status;
+        s
+    }
+
+    #[test]
+    fn reconcile_remote_panes_removes_idle_sessions_from_dead_panes() {
+        let mut state = AppState::default();
+        state.sessions = vec![
+            remote_session("remote:nyx:%1", "nyx", "%1", SessionStatus::Idle),
+            remote_session("remote:nyx:%2", "nyx", "%2", SessionStatus::Idle),
+        ];
+        let mut live = std::collections::HashSet::new();
+        live.insert("%2");
+        state.reconcile_remote_panes("nyx", &live);
+
+        // The pane that died fades to Completed first (so the card can flash
+        // away on the next tick) instead of being evicted immediately.
+        assert_eq!(state.sessions.len(), 2);
+        let gone = state.sessions.iter().find(|s| s.tmux_pane.as_deref() == Some("%1")).unwrap();
+        assert_eq!(gone.status, SessionStatus::Completed);
+        assert!(gone.completed_at.is_some());
+    }
+
+    #[test]
+    fn reconcile_remote_panes_evicts_already_completed_sessions() {
+        // Simulate the second tick after a pane went away: the session is
+        // already Completed from the previous reconcile — now it should go.
+        let mut state = AppState::default();
+        state.sessions = vec![
+            remote_session("remote:nyx:%1", "nyx", "%1", SessionStatus::Completed),
+        ];
+        let live: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        state.reconcile_remote_panes("nyx", &live);
+        assert!(state.sessions.is_empty());
+    }
+
+    #[test]
+    fn reconcile_remote_panes_leaves_other_hosts_untouched() {
+        let mut state = AppState::default();
+        state.sessions = vec![
+            remote_session("remote:nyx:%1", "nyx", "%1", SessionStatus::Idle),
+            remote_session("remote:zeus:%1", "zeus", "%1", SessionStatus::Idle),
+        ];
+        let live: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        state.reconcile_remote_panes("nyx", &live);
+        // The zeus session must survive — we reconciled only against nyx.
+        assert!(state.sessions.iter().any(|s| s.host.as_deref() == Some("zeus")));
+    }
+
+    #[test]
+    fn reconcile_remote_panes_never_touches_local_sessions() {
+        let mut state = AppState::default();
+        let mut local = Session::new("local-1".into(), 0, "/tmp/a".into());
+        local.tmux_pane = Some("%1".into()); // same pane id as a remote one
+        local.status = SessionStatus::Idle;
+        state.sessions = vec![
+            local,
+            remote_session("remote:nyx:%1", "nyx", "%1", SessionStatus::Idle),
+        ];
+        let live: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        state.reconcile_remote_panes("nyx", &live);
+        // Local session sharing the pane id stays; remote gets faded.
+        assert!(state.sessions.iter().any(|s| s.host.is_none()));
+    }
+
+    #[test]
+    fn pr_picker_filter_matches_title_substring_case_insensitive() {
+        let mut state = AppState::default();
+        state.pr_picker_prs = vec![
+            mk_pr(1, "Add caching layer", "feat/cache", "alice"),
+            mk_pr(2, "Fix flaky test", "fix/flaky", "bob"),
+            mk_pr(3, "Refactor router", "refactor/router", "alice"),
+        ];
+        state.pr_picker_query = "CACHE".into();
+        let nums: Vec<u32> = state.filtered_pr_picker().iter().map(|p| p.number).collect();
+        assert_eq!(nums, vec![1]);
+    }
+
+    #[test]
+    fn pr_picker_filter_matches_number_prefix() {
+        let mut state = AppState::default();
+        state.pr_picker_prs = vec![
+            mk_pr(42, "One", "a", "x"),
+            mk_pr(123, "Two", "b", "y"),
+            mk_pr(1234, "Three", "c", "z"),
+        ];
+        state.pr_picker_query = "123".into();
+        let nums: Vec<u32> = state.filtered_pr_picker().iter().map(|p| p.number).collect();
+        assert_eq!(nums, vec![123, 1234]);
+    }
+
+    #[test]
+    fn pr_picker_filter_matches_author_or_branch() {
+        let mut state = AppState::default();
+        state.pr_picker_prs = vec![
+            mk_pr(1, "A", "feat/x", "alice"),
+            mk_pr(2, "B", "bugfix/y", "bob"),
+        ];
+        state.pr_picker_query = "bob".into();
+        let nums: Vec<u32> = state.filtered_pr_picker().iter().map(|p| p.number).collect();
+        assert_eq!(nums, vec![2]);
+
+        state.pr_picker_query = "bugfix".into();
+        let nums: Vec<u32> = state.filtered_pr_picker().iter().map(|p| p.number).collect();
+        assert_eq!(nums, vec![2]);
+    }
+
+    #[test]
+    fn pr_picker_navigate_clamps_to_filtered_bounds() {
+        let mut state = AppState::default();
+        state.pr_picker_prs = vec![
+            mk_pr(1, "A", "a", "x"),
+            mk_pr(2, "B", "b", "y"),
+            mk_pr(3, "C", "c", "z"),
+        ];
+        state.pr_picker_selected = 0;
+        state.navigate_pr_picker(1);
+        assert_eq!(state.pr_picker_selected, 1);
+        state.navigate_pr_picker(1);
+        assert_eq!(state.pr_picker_selected, 2);
+        state.navigate_pr_picker(1);
+        assert_eq!(state.pr_picker_selected, 2); // clamped
+        state.navigate_pr_picker(-1);
+        state.navigate_pr_picker(-1);
+        state.navigate_pr_picker(-1);
+        assert_eq!(state.pr_picker_selected, 0); // clamped
+    }
+
+    #[test]
+    fn pr_picker_enter_returns_submit_and_clears_state() {
+        use crossterm::event::KeyCode;
+        let mut state = AppState::default();
+        state.pr_picker_mode = true;
+        state.pr_picker_cwd = Some("/tmp/repo".into());
+        state.pr_picker_prs = vec![mk_pr(7, "Ship it", "feat/x", "alice")];
+        state.pr_picker_selected = 0;
+
+        let submit = state.apply_pr_picker_key(KeyCode::Enter, false);
+        let submit = submit.expect("Enter on a valid row should return a submission");
+        assert_eq!(submit.number, 7);
+        assert_eq!(submit.title, "Ship it");
+        assert_eq!(submit.cwd, "/tmp/repo");
+        assert!(!state.pr_picker_mode);
+        assert!(state.pr_picker_prs.is_empty());
+    }
+
+    #[test]
+    fn pr_picker_esc_closes_without_submission() {
+        use crossterm::event::KeyCode;
+        let mut state = AppState::default();
+        state.pr_picker_mode = true;
+        state.pr_picker_prs = vec![mk_pr(1, "A", "a", "x")];
+        assert!(state.apply_pr_picker_key(KeyCode::Esc, false).is_none());
+        assert!(!state.pr_picker_mode);
+        assert!(state.pr_picker_prs.is_empty());
     }
 
     #[test]

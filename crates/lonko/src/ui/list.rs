@@ -103,6 +103,9 @@ const SUBAGENT_CARD_HEIGHT: u16 = 2;
 const SEP_HEIGHT: u16 = 1;
 /// One-line group header drawn above the first card of a multi-agent group.
 pub(crate) const GROUP_HEADER_HEIGHT: u16 = 1;
+/// One-line divider drawn above the first remote agent when remote support
+/// is enabled and at least one local agent is visible above it.
+pub(crate) const REMOTE_SEP_HEIGHT: u16 = 1;
 
 /// Card height for a session: 5 lines (6 when a bookmark note is shown).
 /// Inline-expanded subagent rows are compact — 2 lines.
@@ -202,27 +205,69 @@ pub(crate) fn compute_header_and_collapsed(
     (header_flags, collapsed_flags)
 }
 
-/// Total height for the card at `visible[idx]`, including the group header
-/// when `header_flags[idx]` is set. When `collapsed_flags[idx]` is true
+/// For each session in `visible`, whether a one-line remote divider should
+/// be drawn above it. True only at the first session with `host.is_some()`,
+/// and only when `remote_enabled` is true and at least one local session
+/// precedes it in the visible list. All other indices are false.
+pub(crate) fn compute_remote_sep_flags(visible: &[&Session], remote_enabled: bool) -> Vec<bool> {
+    let mut flags = vec![false; visible.len()];
+    if !remote_enabled {
+        return flags;
+    }
+    let mut seen_local = false;
+    for (i, s) in visible.iter().enumerate() {
+        if s.host.is_none() {
+            if !s.is_subagent() {
+                seen_local = true;
+            }
+            continue;
+        }
+        if seen_local {
+            flags[i] = true;
+        }
+        break;
+    }
+    flags
+}
+
+/// Total height for the card at `visible[idx]`, including any group header
+/// and remote divider drawn above it. When `collapsed_flags[idx]` is true
 /// the card is a collapsed-group placeholder: only the header is shown.
-fn slot_height(visible: &[&Session], idx: usize, header_flags: &[bool], collapsed_flags: &[bool], bookmarks: &HashMap<String, String>) -> u16 {
+fn slot_height(
+    visible: &[&Session],
+    idx: usize,
+    header_flags: &[bool],
+    collapsed_flags: &[bool],
+    remote_sep_flags: &[bool],
+    bookmarks: &HashMap<String, String>,
+) -> u16 {
+    let sep = if remote_sep_flags[idx] { REMOTE_SEP_HEIGHT } else { 0 };
     let hdr = if header_flags[idx] { GROUP_HEADER_HEIGHT } else { 0 };
     if collapsed_flags[idx] {
-        return hdr;
+        return sep + hdr;
     }
-    hdr + card_height(visible[idx], bookmarks)
+    sep + hdr + card_height(visible[idx], bookmarks)
 }
 
 /// Compute how many cards fit from `start` in `sessions` given `avail` lines,
 /// accounting for any group headers rendered inline.
-pub(crate) fn cards_fitting(sessions: &[&Session], start: usize, avail: u16, header_flags: &[bool], collapsed_flags: &[bool], bookmarks: &HashMap<String, String>) -> usize {
+pub(crate) fn cards_fitting(
+    sessions: &[&Session],
+    start: usize,
+    avail: u16,
+    header_flags: &[bool],
+    collapsed_flags: &[bool],
+    remote_sep_flags: &[bool],
+    bookmarks: &HashMap<String, String>,
+) -> usize {
     if avail == 0 {
         return 0;
     }
     let mut used = 0u16;
     let mut count = 0;
     for i in start..sessions.len() {
-        let h = slot_height(sessions, i, header_flags, collapsed_flags, bookmarks) + if count > 0 { SEP_HEIGHT } else { 0 };
+        let h = slot_height(sessions, i, header_flags, collapsed_flags, remote_sep_flags, bookmarks)
+            + if count > 0 { SEP_HEIGHT } else { 0 };
         if used + h > avail { break; }
         used += h;
         count += 1;
@@ -239,13 +284,14 @@ pub(crate) fn compute_scroll(
     avail: u16,
     header_flags: &[bool],
     collapsed_flags: &[bool],
+    remote_sep_flags: &[bool],
     bookmarks: &HashMap<String, String>,
 ) -> (usize, usize) {
     let total = visible.len();
     if total == 0 || avail == 0 {
         return (0, 0);
     }
-    let approx = cards_fitting(visible, 0, avail, header_flags, collapsed_flags, bookmarks).min(total);
+    let approx = cards_fitting(visible, 0, avail, header_flags, collapsed_flags, remote_sep_flags, bookmarks).min(total);
     let half = approx / 2;
     let scroll = if selected < half {
         0
@@ -254,7 +300,7 @@ pub(crate) fn compute_scroll(
     } else {
         selected - half
     };
-    let cards_visible = cards_fitting(visible, scroll, avail, header_flags, collapsed_flags, bookmarks).min(total - scroll);
+    let cards_visible = cards_fitting(visible, scroll, avail, header_flags, collapsed_flags, remote_sep_flags, bookmarks).min(total - scroll);
     (scroll, cards_visible)
 }
 
@@ -305,9 +351,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let total = visible.len();
     let (header_flags, collapsed_flags) = compute_header_and_collapsed(&visible, state);
     let group_keys = compute_group_keys(&visible);
+    let remote_sep_flags = compute_remote_sep_flags(&visible, state.remote_enabled);
 
     let (scroll, cards_visible) = compute_scroll(
-        &visible, state.selected, list_area.height, &header_flags, &collapsed_flags, &state.bookmarks,
+        &visible, state.selected, list_area.height, &header_flags, &collapsed_flags, &remote_sep_flags, &state.bookmarks,
     );
     let page = &visible[scroll..scroll + cards_visible];
 
@@ -345,14 +392,21 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
 
     // Cards — variable height, with optional 1-line group headers interleaved
     // before the first card of any multi-agent group. For each page element
-    // we remember its (optional header, card) chunk indices so the render
-    // loop can find them back without re-deriving the layout.
-    // Collapsed groups get a header but no card (card chunk has 0 height).
-    let mut card_constraints: Vec<Constraint> = Vec::with_capacity(page.len() * 3);
-    let mut slot_chunks: Vec<(Option<usize>, Option<usize>)> = Vec::with_capacity(page.len());
+    // we remember its (optional remote-sep, optional header, optional card)
+    // chunk indices so the render loop can find them back without
+    // re-deriving the layout. Collapsed groups get a header but no card.
+    let mut card_constraints: Vec<Constraint> = Vec::with_capacity(page.len() * 4);
+    let mut slot_chunks: Vec<(Option<usize>, Option<usize>, Option<usize>)> =
+        Vec::with_capacity(page.len());
     for (i, s) in page.iter().enumerate() {
         let global_idx = scroll + i;
         let is_collapsed = collapsed_flags[global_idx];
+        let remote_sep_idx = if remote_sep_flags[global_idx] {
+            card_constraints.push(Constraint::Length(REMOTE_SEP_HEIGHT));
+            Some(card_constraints.len() - 1)
+        } else {
+            None
+        };
         let header_idx = if header_flags[global_idx] {
             card_constraints.push(Constraint::Length(GROUP_HEADER_HEIGHT));
             Some(card_constraints.len() - 1)
@@ -372,7 +426,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             card_constraints.push(Constraint::Length(ch));
             Some(card_constraints.len() - 1)
         };
-        slot_chunks.push((header_idx, card_idx));
+        slot_chunks.push((remote_sep_idx, header_idx, card_idx));
         if i < page.len() - 1 {
             card_constraints.push(Constraint::Length(SEP_HEIGHT));
         }
@@ -393,7 +447,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         let a = scroll + i;
         let b = a + 1;
         if group_keys[a].is_some() && group_keys[a] == group_keys[b]
-            && let (_, Some(card_idx)) = slot_chunks[i] {
+            && let (_, _, Some(card_idx)) = slot_chunks[i] {
                 let sep_idx = card_idx + 1;
                 if sep_idx < chunks.len() {
                     let sep = chunks[sep_idx];
@@ -412,10 +466,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 
     for (i, session) in page.iter().enumerate() {
-        let (header_idx, card_idx) = slot_chunks[i];
+        let (remote_sep_idx, header_idx, card_idx) = slot_chunks[i];
         let global_idx = scroll + i;
         let selected = global_idx == state.selected;
         let is_collapsed = collapsed_flags[global_idx];
+
+        if let Some(rs_idx) = remote_sep_idx
+            && rs_idx < chunks.len() {
+                render_remote_divider(frame, chunks[rs_idx]);
+            }
 
         if let Some(hdr_idx) = header_idx
             && hdr_idx < chunks.len() {
@@ -864,6 +923,29 @@ fn status_color(status: &SessionStatus) -> Color {
     }
 }
 
+/// Render a one-line divider that separates local agents from the remote
+/// section. Uses the purple SSH accent so the boundary is visually tied to
+/// the remote cards below it.
+fn render_remote_divider(frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let label = " remote ";
+    let label_cols = UnicodeWidthStr::width(label);
+    let total = area.width as usize;
+    let left_dashes = 2usize;
+    let right_dashes = total.saturating_sub(left_dashes + label_cols);
+    let line = Line::from(vec![
+        Span::styled("─".repeat(left_dashes), Style::default().fg(BORDER_INACTIVE)),
+        Span::styled(
+            label,
+            Style::default().fg(SSH_ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("─".repeat(right_dashes), Style::default().fg(BORDER_INACTIVE)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
 /// Render a one-line group header above the first card of a multi-agent
 /// group. Shows `▶` when collapsed, `▾` when expanded. When collapsed,
 /// appends the agent count so the user knows how many are hidden.
@@ -916,6 +998,46 @@ mod tests {
         s.depth = 1;
         s.repo_root = Some(repo.into());
         s
+    }
+
+    fn remote_main(id: &str, host: &str, repo: &str) -> Session {
+        let mut s = main_with_repo(id, repo);
+        s.host = Some(host.into());
+        s
+    }
+
+    #[test]
+    fn remote_sep_flags_fires_at_first_remote_after_local() {
+        let s0 = main_with_repo("local1", "/r/a");
+        let s1 = main_with_repo("local2", "/r/a");
+        let s2 = remote_main("r1", "nyx", "/remote/a");
+        let s3 = remote_main("r2", "nyx", "/remote/a");
+        let visible = vec![&s0, &s1, &s2, &s3];
+
+        let flags = compute_remote_sep_flags(&visible, true);
+        assert_eq!(flags, vec![false, false, true, false]);
+    }
+
+    #[test]
+    fn remote_sep_flags_gated_on_remote_enabled() {
+        let s0 = main_with_repo("local1", "/r/a");
+        let s1 = remote_main("r1", "nyx", "/remote/a");
+        let visible = vec![&s0, &s1];
+
+        let flags = compute_remote_sep_flags(&visible, false);
+        assert_eq!(flags, vec![false, false]);
+    }
+
+    #[test]
+    fn remote_sep_flags_no_divider_when_remote_only() {
+        // Without any local above, skip the divider — a bare label at the
+        // top of the list adds noise instead of clarifying a boundary.
+        let s0 = remote_main("r1", "nyx", "/remote/a");
+        let s1 = remote_main("r2", "zeus", "/remote/b");
+        let visible = vec![&s0, &s1];
+
+        let flags = compute_remote_sep_flags(&visible, true);
+        assert_eq!(flags, vec![false, false]);
     }
 
     #[test]

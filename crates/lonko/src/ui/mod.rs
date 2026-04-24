@@ -4,6 +4,7 @@ mod header;
 mod help;
 pub(crate) mod list;
 mod new_agent;
+mod pr_picker;
 mod remote;
 pub(crate) mod tmux_sessions;
 
@@ -48,5 +49,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     if state.new_agent_mode {
         new_agent::render(frame, state);
+    }
+
+    if state.pr_picker_mode {
+        pr_picker::render(frame, state);
     }
 }

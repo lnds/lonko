@@ -370,12 +370,15 @@ impl App {
         let list_h = h.saturating_sub(3 + 1);
         let (header_flags, collapsed_flags) =
             ui::list::compute_header_and_collapsed(&visible, &self.state);
+        let remote_sep_flags =
+            ui::list::compute_remote_sep_flags(&visible, self.state.remote_enabled);
         let (scroll, cards_visible) = ui::list::compute_scroll(
-            &visible, self.state.selected, list_h, &header_flags, &collapsed_flags, &self.state.bookmarks,
+            &visible, self.state.selected, list_h, &header_flags, &collapsed_flags, &remote_sep_flags, &self.state.bookmarks,
         );
 
         // Linear scan to find which card was clicked based on row offset from y=3.
-        // Must mirror the render layout: header + card + separator (between cards only).
+        // Must mirror the render layout: remote-sep + header + card + separator
+        // (separator between cards only).
         let click_y = row - 3;
         let mut y_acc: u16 = 0;
         let mut card_idx: Option<usize> = None;
@@ -384,6 +387,9 @@ impl App {
             let global = scroll + i;
             if i > 0 {
                 y_acc += 1; // separator between cards (not before first)
+            }
+            if remote_sep_flags[global] {
+                y_acc += ui::list::REMOTE_SEP_HEIGHT;
             }
             if header_flags[global] {
                 let hdr_h = ui::list::GROUP_HEADER_HEIGHT;
@@ -1062,6 +1068,27 @@ impl App {
                     }
                 }
             }
+            Event::PrPickerLoaded { cwd, result } => {
+                // Drop the payload if the user already closed the picker or
+                // moved on to a different repo — otherwise we'd flash stale
+                // results into a fresh session.
+                if !self.state.pr_picker_mode
+                    || self.state.pr_picker_cwd.as_deref() != Some(cwd.as_str())
+                {
+                    return Ok(false);
+                }
+                self.state.pr_picker_loading = false;
+                match result {
+                    Ok(prs) => {
+                        self.state.pr_picker_prs = prs;
+                        self.state.pr_picker_selected = 0;
+                        self.state.pr_picker_error = None;
+                    }
+                    Err(e) => {
+                        self.state.pr_picker_error = Some(e);
+                    }
+                }
+            }
         }
         Ok(false)
     }
@@ -1353,8 +1380,18 @@ impl App {
         // currently has a Claude process running. Hooks (when they
         // eventually fire) promote these in-place — see
         // `resolve_hook_session`'s `remote:<host>:<pane>` branch.
+        //
+        // Then reconcile the other way: if we have an agent for this host
+        // whose pane no longer shows up in the snapshot, treat it as gone
+        // (fade to Completed, then prune). Without this step, provisional
+        // remote agents linger after the user kills their Claude pane.
         if !is_error {
             self.seed_remote_provisional_agents(&snapshot_host, &claude_panes);
+            let live: std::collections::HashSet<&str> = claude_panes
+                .iter()
+                .map(|p| p.pane_id.as_str())
+                .collect();
+            self.state.reconcile_remote_panes(&snapshot_host, &live);
         }
 
         // Clamp selection.
@@ -1516,6 +1553,23 @@ impl App {
         if self.state.new_agent_mode {
             if let Some((prompt, cwd)) = self.state.apply_new_agent_key(key.code, ctrl) {
                 self.spawn_new_agent(&cwd, &prompt);
+            }
+            return Ok(false);
+        }
+        if self.state.pr_picker_mode {
+            // Ctrl-C exits lonko entirely (same as the main handler). This
+            // keeps the shortcut consistent even when a modal is open — the
+            // previous "swallow Ctrl-C to close the modal" behavior left
+            // users hitting Ctrl-C repeatedly with no visible effect when
+            // the overlay didn't render in narrow panes.
+            if ctrl && matches!(key.code, KeyCode::Char('c')) {
+                self.state.clear_pr_picker();
+                return Ok(true);
+            }
+            if let Some(submit) = self.state.apply_pr_picker_key(key.code, ctrl)
+                && !submit.cwd.is_empty()
+            {
+                self.spawn_pr_by_number(&submit.cwd, submit.number, &submit.title);
             }
             return Ok(false);
         }
@@ -1685,7 +1739,7 @@ impl App {
                 self.launch_worktree_prompt();
             }
             KeyCode::Char('p') if self.state.active_tab == Tab::Agents => {
-                self.spawn_pr_worktree();
+                self.open_pr_picker();
             }
             KeyCode::Char('e') if self.state.active_tab == Tab::Agents => {
                 // Expand / collapse subagents inline under the selected main.
@@ -1934,21 +1988,48 @@ impl App {
         });
     }
 
-    /// Look up the PR for the selected agent's branch and create a worktree from it.
-    fn spawn_pr_worktree(&self) {
-        let Some(session) = self.state.selected_session() else { return };
-        let Some(branch) = session.branch.clone() else {
-            tmux::display_message("pr-worktree: no branch detected for this agent");
+    /// Open the PR picker modal: mark it as loading and kick off a
+    /// background `gh pr list` for the selected agent's repo. The fetch
+    /// result comes back through `Event::PrPickerLoaded`, which the main
+    /// handler writes into `AppState`.
+    fn open_pr_picker(&mut self) {
+        let cwd = self
+            .state
+            .selected_session()
+            .map(|s| s.cwd.clone())
+            .or_else(|| self.state.sessions.iter().find(|s| s.host.is_none()).map(|s| s.cwd.clone()));
+        let Some(cwd) = cwd else {
+            tmux::display_message("pr-picker: no local agent to anchor the repo");
             return;
         };
-        let cwd = session.cwd.clone();
+        if !crate::worktree::has_gh() {
+            tmux::display_message("pr-picker: `gh` CLI not found");
+            return;
+        }
+        self.state.pr_picker_mode = true;
+        self.state.pr_picker_loading = true;
+        self.state.pr_picker_error = None;
+        self.state.pr_picker_prs.clear();
+        self.state.pr_picker_selected = 0;
+        self.state.pr_picker_query.clear();
+        self.state.pr_picker_cwd = Some(cwd.clone());
+
+        let Some(ref tx) = self.scan_tx else { return };
+        let tx = tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = crate::worktree::list_open_prs(&cwd);
+            let _ = tx.send(Event::PrPickerLoaded { cwd, result });
+        });
+    }
+
+    /// Create a worktree + tmux session + claude for an arbitrary PR number.
+    /// Used by the PR picker when the user confirms a row with Enter.
+    fn spawn_pr_by_number(&self, cwd: &str, number: u32, title: &str) {
+        let cwd = cwd.to_string();
+        let title = title.to_string();
         std::thread::spawn(move || {
-            let Some(pr) = crate::worktree::pr_for_branch(&cwd, &branch) else {
-                tmux::display_message(&format!("pr-worktree: no open PR found for branch '{branch}'"));
-                return;
-            };
-            if let Err(e) = crate::worktree::run_from_pr(&cwd, &pr) {
-                tmux::display_message(&format!("pr-worktree: {e}"));
+            if let Err(e) = crate::worktree::run_from_pr_number(&cwd, number, &title) {
+                tmux::display_message(&format!("pr-picker: {e}"));
             }
         });
     }

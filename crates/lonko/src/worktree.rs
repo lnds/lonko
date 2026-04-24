@@ -192,50 +192,56 @@ pub fn run(cwd: &str, branch: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Metadata for an open pull request associated with a branch.
-#[derive(Debug, Clone)]
-pub struct PrInfo {
-    pub number: u32,
-    pub title: String,
-    pub branch: String,
-}
-
-/// Query GitHub for an **open** PR whose head branch matches `branch`.
-/// Requires the `gh` CLI. Returns `None` when no open PR exists, `gh` is
-/// missing, or the repo has no GitHub remote.
-pub fn pr_for_branch(cwd: &str, branch: &str) -> Option<PrInfo> {
+/// List all open PRs for the GitHub repo containing `cwd` via `gh`.
+///
+/// Requires `gh` to be installed and authenticated. Returns the error
+/// message (stderr first line, falling back to a generic) so the UI can
+/// surface it in the picker.
+pub fn list_open_prs(cwd: &str) -> std::result::Result<Vec<crate::state::PrPickItem>, String> {
     let output = Command::new("gh")
         .args([
             "pr", "list",
-            "--head", branch,
             "--state", "open",
-            "--json", "number,title,headRefName",
-            "--jq", ".[0] | .number,.title,.headRefName",
+            "--limit", "100",
+            "--json", "number,title,headRefName,author,updatedAt",
         ])
         .current_dir(cwd)
         .output()
-        .ok()?;
+        .map_err(|e| format!("failed to run gh: {e}"))?;
     if !output.status.success() {
-        return None;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let first = stderr.lines().next().unwrap_or("gh pr list failed");
+        return Err(first.to_string());
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
+    #[derive(serde::Deserialize, Default)]
+    struct Author { #[serde(default)] login: String }
+    #[derive(serde::Deserialize)]
+    struct Row {
+        number: u32,
+        #[serde(default)] title: String,
+        #[serde(default, rename = "headRefName")] head_ref_name: String,
+        #[serde(default)] author: Author,
+        #[serde(default, rename = "updatedAt")] updated_at: String,
     }
-    let mut lines = text.lines();
-    let number: u32 = lines.next()?.parse().ok()?;
-    let title = lines.next()?.to_string();
-    let head_branch = lines.next()?.to_string();
-    Some(PrInfo { number, title, branch: head_branch })
+    let rows: Vec<Row> = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("gh returned malformed JSON: {e}"))?;
+    Ok(rows
+        .into_iter()
+        .map(|r| crate::state::PrPickItem {
+            number: r.number,
+            title: r.title,
+            branch: r.head_ref_name,
+            author: r.author.login,
+            updated_at: r.updated_at,
+        })
+        .collect())
 }
 
-/// Create a worktree from a PR branch, open a tmux session, and launch claude.
-///
-/// Uses `gh pr checkout` semantics: fetches the remote branch so the local
-/// worktree tracks the PR head. Falls back to `worktree::run` if the branch
-/// is already available locally.
-pub fn run_from_pr(cwd: &str, pr: &PrInfo) -> anyhow::Result<()> {
+/// Create a worktree for an arbitrary PR (by number) and launch a fresh
+/// Claude agent inside it. Unlike `run_from_pr` this fetches through the
+/// `pull/<N>/head` refspec, which works for both same-repo and fork PRs
+/// without requiring the branch to be available under `origin/<name>`.
+pub fn run_from_pr_number(cwd: &str, number: u32, title: &str) -> anyhow::Result<()> {
     let root = git_root(cwd)
         .ok_or_else(|| anyhow::anyhow!("not a git repository: {cwd}"))?;
 
@@ -244,53 +250,57 @@ pub fn run_from_pr(cwd: &str, pr: &PrInfo) -> anyhow::Result<()> {
         .and_then(|n| n.to_str())
         .unwrap_or("repo");
 
-    let safe_branch = sanitize_branch(&pr.branch);
-    let session_name = format!("{repo_name}-{safe_branch}");
+    let local_branch = format!("pr-{number}");
+    let session_name = format!("{repo_name}-pr-{number}");
     let worktree_path = Path::new(&root)
         .parent()
         .unwrap_or(Path::new("/tmp"))
         .join(&session_name);
+    let wt_str = worktree_path.to_string_lossy().to_string();
 
-    let wt_str = worktree_path.to_string_lossy();
-
-    // Fetch the PR branch from origin so the worktree tracks upstream
-    let _ = Command::new("git")
-        .args(["-C", &root, "fetch", "origin", &pr.branch])
-        .status();
-
-    // Create worktree tracking the remote branch
-    let status = Command::new("git")
-        .args([
-            "-C", &root, "worktree", "add",
-            &wt_str, "-b", &pr.branch,
-            &format!("origin/{}", pr.branch),
-        ])
-        .status()?;
-    if !status.success() {
-        // Branch may already exist locally — try plain worktree add
-        let status = Command::new("git")
-            .args(["-C", &root, "worktree", "add", &wt_str, &pr.branch])
-            .status()?;
-        if !status.success() {
-            anyhow::bail!("git worktree add failed for PR #{} (branch '{}')", pr.number, pr.branch);
-        }
+    // Fast path: the worktree already exists from a previous `p` run —
+    // reuse it instead of re-fetching. Idempotency makes the picker safe
+    // to re-enter without piling up duplicate checkouts.
+    if worktree_path.exists() {
+        // Try to reattach a tmux session for it (or create one if it was
+        // killed). We don't re-launch claude because the user may already
+        // be mid-review; a simple switch is the principle of least surprise.
+        let _ = tmux::create_session(&session_name, &wt_str);
+        let _ = Command::new("tmux")
+            .args(["switch-client", "-t", &session_name])
+            .status();
+        return Ok(());
     }
 
-    // Propagate local environment config to the new worktree
-    setup_worktree_env(&root, &worktree_path);
+    // Force-update the local branch to the PR head — covers the case where
+    // `pr-<N>` already exists from a prior run but the worktree dir is gone.
+    let refspec = format!("+refs/pull/{number}/head:refs/heads/{local_branch}");
+    let status = Command::new("git")
+        .args(["-C", &root, "fetch", "origin", &refspec])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("git fetch failed for PR #{number}");
+    }
 
-    // Create tmux session in the worktree directory
+    let status = Command::new("git")
+        .args(["-C", &root, "worktree", "add", &wt_str, &local_branch])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("git worktree add failed for PR #{number}");
+    }
+
+    setup_worktree_env(&root, &worktree_path);
     tmux::create_session(&session_name, &wt_str)?;
 
-    // Show PR context before launching claude
-    let pr_msg = format!("clear && echo '# PR #{}: {}' && claude", pr.number, pr.title.replace('\'', "'\\''"));
+    let pr_msg = format!(
+        "clear && echo '# PR #{number}: {}' && claude",
+        title.replace('\'', "'\\''")
+    );
     tmux::send_command(&session_name, &pr_msg)?;
 
-    // Switch to the new session
     let _ = Command::new("tmux")
         .args(["switch-client", "-t", &session_name])
         .status();
-
     Ok(())
 }
 

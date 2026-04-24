@@ -35,4 +35,11 @@ pub enum Event {
         host: String,
         result: Result<crate::sources::remote_bridge::RemoteBridge, String>,
     },
+    /// Result of the background `gh pr list` call kicked off when the user
+    /// opens the PR picker. The picker stays in "loading…" until this event
+    /// lands; on error we stash the message in `AppState::pr_picker_error`.
+    PrPickerLoaded {
+        cwd: String,
+        result: Result<Vec<crate::state::PrPickItem>, String>,
+    },
 }
