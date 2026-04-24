@@ -1,3 +1,9 @@
+## v0.18.0 (2026-04-24)
+
+### Feat
+
+- **ui**: PR picker, remote section in agents list, reap ghost remotes
+
 ## v0.17.2 (2026-04-23)
 
 ### Fix
