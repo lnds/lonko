@@ -1,3 +1,9 @@
+## v0.18.6 (2026-04-25)
+
+### Fix
+
+- **worktree**: clean up branch when closing agent without merged PR
+
 ## v0.18.5 (2026-04-25)
 
 ### Fix
