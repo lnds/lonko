@@ -166,9 +166,14 @@ pub fn run(cwd: &str, prompt: &str) -> anyhow::Result<()> {
 fn unique_session_name(cwd: &str) -> String {
     let base = derive_session_name(cwd);
 
+    // Silence stdio: `has-session` prints "can't find session" to stderr on the
+    // common-case miss (we're probing for a free name), which would otherwise
+    // bleed onto the lonko TUI alternate screen.
     let exists = |name: &str| -> bool {
         Command::new("tmux")
             .args(["has-session", "-t", name])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
