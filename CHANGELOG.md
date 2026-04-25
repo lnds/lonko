@@ -1,3 +1,9 @@
+## v0.18.3 (2026-04-24)
+
+### Fix
+
+- **state**: converge pidless provisionals by pane after /clear
+
 ## v0.18.2 (2026-04-24)
 
 ### Fix
