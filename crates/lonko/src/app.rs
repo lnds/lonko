@@ -186,6 +186,8 @@ fn ensure_remote_host_session(host: &str, local_session: &str) {
     );
     let _ = std::process::Command::new("tmux")
         .args(["new-session", "-d", "-s", local_session, &ssh_cmd])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status();
 }
 
@@ -673,20 +675,27 @@ impl App {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        // Ensure lonko-tray exists
+        // Ensure lonko-tray exists. Silence stdio so tmux's "can't find session"
+        // (expected when the tray hasn't been created yet) and similar messages
+        // don't bleed onto the TUI alternate screen.
         let tray_exists = std::process::Command::new("tmux")
             .args(["has-session", "-t", "lonko-tray"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
         if !tray_exists {
             let _ = std::process::Command::new("tmux")
                 .args(["new-session", "-d", "-s", "lonko-tray"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .status();
         }
 
         let _ = std::process::Command::new("tmux")
             .args(["break-pane", "-d", "-s", own, "-t", "lonko-tray:"])
+            .stderr(std::process::Stdio::null())
             .status();
 
         // Restore the window's saved layout (undoes the distortion that happened
@@ -699,6 +708,7 @@ impl App {
                 if !layout.is_empty() {
                     let _ = std::process::Command::new("tmux")
                         .args(["select-layout", "-t", &win, layout])
+                        .stderr(std::process::Stdio::null())
                         .status();
                 }
                 let _ = std::fs::remove_file(&layout_path);
