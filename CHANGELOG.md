@@ -1,3 +1,9 @@
+## v0.18.2 (2026-04-24)
+
+### Fix
+
+- **state**: reap local agents whose Claude process has exited
+
 ## v0.18.1 (2026-04-24)
 
 ### Fix
