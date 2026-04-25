@@ -395,9 +395,11 @@ pub fn session_cwd(session_name: &str) -> Option<String> {
 }
 
 /// Create a new detached tmux session with the given name and working directory.
+/// Silences stderr — see `focus_pane` for the rationale.
 pub fn create_session(name: &str, cwd: &str) -> anyhow::Result<()> {
     let status = Command::new("tmux")
         .args(["new-session", "-d", "-s", name, "-c", cwd])
+        .stderr(Stdio::null())
         .status()?;
     if !status.success() {
         anyhow::bail!("tmux new-session failed for {name}");
@@ -406,9 +408,11 @@ pub fn create_session(name: &str, cwd: &str) -> anyhow::Result<()> {
 }
 
 /// Send Ctrl-C to a tmux pane (non-literal, so tmux interprets C-c as the real key).
+/// Silences stderr — see `focus_pane` for the rationale.
 pub fn send_ctrl_c(pane_id: &str) -> anyhow::Result<()> {
     let status = Command::new("tmux")
         .args(["send-keys", "-t", pane_id, "C-c"])
+        .stderr(Stdio::null())
         .status()?;
     if !status.success() {
         anyhow::bail!("tmux send-keys C-c failed for pane {pane_id}");
@@ -417,9 +421,11 @@ pub fn send_ctrl_c(pane_id: &str) -> anyhow::Result<()> {
 }
 
 /// Kill an entire tmux session by name.
+/// Silences stderr — see `focus_pane` for the rationale.
 pub fn kill_session(session_name: &str) -> anyhow::Result<()> {
     let status = Command::new("tmux")
         .args(["kill-session", "-t", session_name])
+        .stderr(Stdio::null())
         .status()?;
     if !status.success() {
         anyhow::bail!("tmux kill-session failed for {session_name}");
@@ -428,9 +434,11 @@ pub fn kill_session(session_name: &str) -> anyhow::Result<()> {
 }
 
 /// Kill the tmux window that contains `pane_id`.
+/// Silences stderr — see `focus_pane` for the rationale.
 pub fn kill_window(pane_id: &str) -> anyhow::Result<()> {
     let status = Command::new("tmux")
         .args(["kill-window", "-t", pane_id])
+        .stderr(Stdio::null())
         .status()?;
     if !status.success() {
         anyhow::bail!("tmux kill-window failed for pane {pane_id}");
@@ -439,16 +447,20 @@ pub fn kill_window(pane_id: &str) -> anyhow::Result<()> {
 }
 
 /// Show a message in the tmux status line. Fire-and-forget: ignores errors.
+/// Silences stderr — see `focus_pane` for the rationale.
 pub fn display_message(msg: &str) {
     let _ = Command::new("tmux")
         .args(["display-message", msg])
+        .stderr(Stdio::null())
         .status();
 }
 
 /// Send a command to a tmux target followed by Enter.
+/// Silences stderr — see `focus_pane` for the rationale.
 pub fn send_command(target: &str, command: &str) -> anyhow::Result<()> {
     let status = Command::new("tmux")
         .args(["send-keys", "-t", target, command, "Enter"])
+        .stderr(Stdio::null())
         .status()?;
     if !status.success() {
         anyhow::bail!("tmux send-keys failed for {target}");
