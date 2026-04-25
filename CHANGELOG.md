@@ -1,3 +1,9 @@
+## v0.18.4 (2026-04-24)
+
+### Fix
+
+- **tmux**: suppress stderr on direct switch-client calls
+
 ## v0.18.3 (2026-04-24)
 
 ### Fix
