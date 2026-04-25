@@ -1,3 +1,12 @@
+## v0.18.5 (2026-04-25)
+
+### Fix
+
+- **new-agent**: silence has-session probes when picking unique name
+- **app**: silence stderr on direct tmux invocations from TUI
+- **tmux**: silence stderr on remaining TUI-context wrappers
+- **worktree**: capture git stdout/stderr to prevent TUI corruption
+
 ## v0.18.4 (2026-04-24)
 
 ### Fix
