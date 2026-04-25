@@ -876,6 +876,46 @@ impl AppState {
         self.clamp_selected();
     }
 
+    /// Local counterpart to `reconcile_remote_panes`: reap agents whose
+    /// owning Claude process has exited. Catches phantoms left over when
+    /// SessionEnd never fired (kill -9, crash, lonko restart after the
+    /// process died) and `lifecycle` never saw the file disappear.
+    ///
+    /// Conservative on purpose — only acts when the PID is clearly dead.
+    /// Panes whose Claude process has crashed but whose PID got reused by
+    /// an unrelated process are *not* reaped here; `TmuxPaneGone` still
+    /// handles the "pane went away" case separately.
+    pub fn reap_dead_local_sessions(&mut self, is_alive: impl Fn(u32) -> bool) {
+        let dead: Vec<usize> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                if s.host.is_some() { return None; }
+                if s.pid == 0 { return None; }
+                if is_alive(s.pid) { return None; }
+                Some(i)
+            })
+            .collect();
+        for i in dead.into_iter().rev() {
+            let session = &mut self.sessions[i];
+            match session.status {
+                SessionStatus::Running
+                | SessionStatus::RunningTool(_)
+                | SessionStatus::WaitingForUser(_)
+                | SessionStatus::WaitingForInput
+                | SessionStatus::Idle => {
+                    session.completed_at = Some(Instant::now());
+                    session.status = SessionStatus::Completed;
+                }
+                _ => {
+                    self.sessions.remove(i);
+                }
+            }
+        }
+        self.clamp_selected();
+    }
+
     /// Drop sessions that have been completed for longer than `ttl_secs`.
     pub fn prune_completed(&mut self, ttl_secs: u64) {
         self.sessions.retain(|s| {
@@ -1768,6 +1808,47 @@ mod tests {
         state.reconcile_remote_panes("nyx", &live);
         // Local session sharing the pane id stays; remote gets faded.
         assert!(state.sessions.iter().any(|s| s.host.is_none()));
+    }
+
+    #[test]
+    fn reap_dead_local_sessions_fades_idle_whose_pid_is_dead() {
+        let mut state = AppState::default();
+        let mut alive = Session::new("alive".into(), 100, "/tmp/a".into());
+        alive.status = SessionStatus::Idle;
+        alive.tmux_pane = Some("%1".into());
+        let mut dead = Session::new("dead".into(), 200, "/tmp/b".into());
+        dead.status = SessionStatus::Idle;
+        state.sessions = vec![alive, dead];
+
+        state.reap_dead_local_sessions(|pid| pid == 100);
+
+        let a = state.sessions.iter().find(|s| s.id == "alive").unwrap();
+        assert_eq!(a.status, SessionStatus::Idle);
+        let d = state.sessions.iter().find(|s| s.id == "dead").unwrap();
+        assert_eq!(d.status, SessionStatus::Completed);
+        assert!(d.completed_at.is_some());
+    }
+
+    #[test]
+    fn reap_dead_local_sessions_evicts_already_completed() {
+        let mut state = AppState::default();
+        let mut s = Session::new("dead".into(), 200, "/tmp/b".into());
+        s.status = SessionStatus::Completed;
+        state.sessions = vec![s];
+        state.reap_dead_local_sessions(|_| false);
+        assert!(state.sessions.is_empty());
+    }
+
+    #[test]
+    fn reap_dead_local_sessions_never_touches_remote_or_pidless() {
+        let mut state = AppState::default();
+        let remote = remote_session("remote:nyx:%1", "nyx", "%1", SessionStatus::Idle);
+        let mut pidless = Session::new("seeded".into(), 0, "/tmp/c".into());
+        pidless.status = SessionStatus::Idle;
+        state.sessions = vec![remote, pidless];
+        state.reap_dead_local_sessions(|_| false);
+        assert_eq!(state.sessions.len(), 2);
+        assert!(state.sessions.iter().all(|s| s.status == SessionStatus::Idle));
     }
 
     #[test]

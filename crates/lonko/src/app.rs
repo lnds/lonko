@@ -1153,6 +1153,13 @@ impl App {
                 .filter_map(|s| s.tmux_pane.clone())
                 .collect();
             tmux_scanner::scan(tx, &known_panes, self.state.own_pane.as_deref());
+            // Reap local agents whose Claude process has exited. The scanner
+            // only fires TmuxPaneGone for panes that vanished; a phantom whose
+            // pane is gone *and* tmux_pane is None (e.g. lifecycle-only
+            // discoveries that never saw a hook) would otherwise linger.
+            self.state.reap_dead_local_sessions(|pid| unsafe {
+                libc::kill(pid as libc::pid_t, 0) == 0
+            });
         }
 
         // Tailnet peer discovery runs on the background of every 2s tick
