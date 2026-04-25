@@ -162,16 +162,20 @@ pub fn run(cwd: &str, branch: &str) -> anyhow::Result<()> {
 
     let wt_str = worktree_path.to_string_lossy();
 
-    // Create worktree: try with -b (new branch) first, fall back to existing branch
-    let status = Command::new("git")
+    // Create worktree: try with -b (new branch) first, fall back to existing branch.
+    // Use .output() (not .status()) so git's "Preparing worktree..." progress
+    // text on stderr does not bleed onto the lonko TUI alternate screen.
+    let out = Command::new("git")
         .args(["-C", &root, "worktree", "add", &wt_str, "-b", branch])
-        .status()?;
-    if !status.success() {
-        let status = Command::new("git")
+        .output()?;
+    if !out.status.success() {
+        let out = Command::new("git")
             .args(["-C", &root, "worktree", "add", &wt_str, branch])
-            .status()?;
-        if !status.success() {
-            anyhow::bail!("git worktree add failed for branch '{branch}'");
+            .output()?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let first = stderr.lines().next().unwrap_or("git worktree add failed");
+            anyhow::bail!("git worktree add for '{branch}': {first}");
         }
     }
 
@@ -276,19 +280,25 @@ pub fn run_from_pr_number(cwd: &str, number: u32, title: &str) -> anyhow::Result
 
     // Force-update the local branch to the PR head — covers the case where
     // `pr-<N>` already exists from a prior run but the worktree dir is gone.
+    // Use .output() (not .status()) so git's progress text on stderr does
+    // not bleed onto the lonko TUI alternate screen.
     let refspec = format!("+refs/pull/{number}/head:refs/heads/{local_branch}");
-    let status = Command::new("git")
+    let out = Command::new("git")
         .args(["-C", &root, "fetch", "origin", &refspec])
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("git fetch failed for PR #{number}");
+        .output()?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let first = stderr.lines().next().unwrap_or("git fetch failed");
+        anyhow::bail!("git fetch for PR #{number}: {first}");
     }
 
-    let status = Command::new("git")
+    let out = Command::new("git")
         .args(["-C", &root, "worktree", "add", &wt_str, &local_branch])
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("git worktree add failed for PR #{number}");
+        .output()?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let first = stderr.lines().next().unwrap_or("git worktree add failed");
+        anyhow::bail!("git worktree add for PR #{number}: {first}");
     }
 
     setup_worktree_env(&root, &worktree_path);
@@ -345,11 +355,15 @@ pub fn remove(cwd: &str) -> anyhow::Result<()> {
     let main_repo = repo_common_root(cwd)
         .ok_or_else(|| anyhow::anyhow!("cannot derive main repo from {cwd}"))?;
 
-    let status = Command::new("git")
+    // Use .output() (not .status()) so git's stderr does not bleed onto
+    // the lonko TUI alternate screen.
+    let out = Command::new("git")
         .args(["-C", &main_repo, "worktree", "remove", "--force", &wt_root])
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("git worktree remove failed for {wt_root}");
+        .output()?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let first = stderr.lines().next().unwrap_or("git worktree remove failed");
+        anyhow::bail!("git worktree remove for {wt_root}: {first}");
     }
     Ok(())
 }
