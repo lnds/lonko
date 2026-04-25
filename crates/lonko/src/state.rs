@@ -804,6 +804,26 @@ impl AppState {
         }
     }
 
+    /// Attach `pid` to a pidless local provisional whose `tmux_pane`
+    /// matches `pane`. Returns `true` on a hit. Used by
+    /// `on_session_discovered` as a fallback when the id-based match
+    /// misses because the hook's stamped `session_id` diverged from the
+    /// transcript's (common after `/clear`). Without this, the
+    /// provisional would stay at `pid == 0` and `reap_dead_local_sessions`
+    /// would never touch it.
+    ///
+    /// The provisional's `id` is intentionally left alone: future hooks
+    /// from that Claude still carry the hook-original id, and the
+    /// transcript-resolved id can point at a different Claude sharing
+    /// the same cwd.
+    pub fn promote_pidless_by_pane(&mut self, pid: u32, pane: &str) -> bool {
+        let Some(s) = self.sessions.iter_mut().find(|s| {
+            s.pid == 0 && s.host.is_none() && s.tmux_pane.as_deref() == Some(pane)
+        }) else { return false };
+        s.pid = pid;
+        true
+    }
+
     /// Handle a tmux pane going away. Running/waiting/idle sessions are marked
     /// completed so they fade out; already-completed sessions are removed.
     pub fn handle_pane_gone(&mut self, pane_id: &str) {
@@ -1849,6 +1869,46 @@ mod tests {
         state.reap_dead_local_sessions(|_| false);
         assert_eq!(state.sessions.len(), 2);
         assert!(state.sessions.iter().all(|s| s.status == SessionStatus::Idle));
+    }
+
+    #[test]
+    fn promote_pidless_by_pane_attaches_pid_and_preserves_id() {
+        let mut state = AppState::default();
+        let mut p = Session::new("hook-original-id".into(), 0, "/tmp/x".into());
+        p.tmux_pane = Some("%7".into());
+        p.status = SessionStatus::Idle;
+        state.sessions = vec![p];
+
+        assert!(state.promote_pidless_by_pane(42, "%7"));
+
+        let s = &state.sessions[0];
+        assert_eq!(s.pid, 42);
+        assert_eq!(s.id, "hook-original-id", "hook id must not be rewritten");
+    }
+
+    #[test]
+    fn promote_pidless_by_pane_ignores_remote_and_pidded() {
+        let mut state = AppState::default();
+        let remote = remote_session("remote:nyx:%7", "nyx", "%7", SessionStatus::Idle);
+        let mut pidded = Session::new("already-live".into(), 100, "/tmp/p".into());
+        pidded.tmux_pane = Some("%7".into());
+        pidded.status = SessionStatus::Idle;
+        state.sessions = vec![remote, pidded];
+
+        assert!(!state.promote_pidless_by_pane(42, "%7"));
+        assert_eq!(state.sessions[0].pid, 0);
+        assert_eq!(state.sessions[1].pid, 100);
+    }
+
+    #[test]
+    fn promote_pidless_by_pane_returns_false_when_no_provisional_on_pane() {
+        let mut state = AppState::default();
+        let mut p = Session::new("elsewhere".into(), 0, "/tmp/x".into());
+        p.tmux_pane = Some("%3".into());
+        state.sessions = vec![p];
+
+        assert!(!state.promote_pidless_by_pane(42, "%7"));
+        assert_eq!(state.sessions[0].pid, 0);
     }
 
     #[test]

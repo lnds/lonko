@@ -1466,12 +1466,29 @@ impl App {
                 ),
             };
 
-        // If pre-created by hook (pid=0), update with real pid now
+        // If pre-created by hook (pid=0), update with real pid now.
+        //
+        // TODO: `session_id` above comes from
+        // `most_recent_transcript_session(cwd)`, which is a cwd-level
+        // lookup. With N>1 Claudes in the same cwd, `file.pid` can be
+        // attached to the wrong provisional here. Fixing needs a
+        // pid→transcript mapping the on-disk layout does not provide.
         if let Some(s) = self.state.sessions.iter_mut().find(|s| s.id == session_id && s.pid == 0) {
             s.pid = file.pid;
+            return;
         }
-        // Resolve tmux pane immediately so eviction logic works by pane.
+
+        // Fall back to pane-based convergence. The hook's stamped
+        // session_id diverges from the transcript's after `/clear`, so
+        // the id match above can miss; without this fallback the
+        // provisional stays at pid=0 forever and escapes the reaper.
         let tmux_pane = tmux::find_pane_for_pid(file.pid);
+        if let Some(pane) = tmux_pane.as_deref()
+            && self.state.promote_pidless_by_pane(file.pid, pane)
+        {
+            return;
+        }
+
         // Skip if already tracked by pid, session_id, or pane.
         let exists = self.state.sessions.iter().any(|s| {
             s.pid == file.pid
