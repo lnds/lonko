@@ -136,6 +136,7 @@ pub fn attach_remote_agent(host: &str, pane_id: &str) {
     refresh_no_follow_sentinel_async();
     let _ = std::process::Command::new("tmux")
         .args(["switch-client", "-t", &local_session])
+        .stderr(std::process::Stdio::null())
         .status();
 
     // Ask the remote tmux to move to the session containing pane_id.
@@ -580,6 +581,7 @@ impl App {
             }
         let _ = std::process::Command::new("tmux")
             .args(["switch-client", "-t", &name])
+            .stderr(std::process::Stdio::null())
             .status();
     }
 
@@ -623,6 +625,7 @@ impl App {
         refresh_no_follow_sentinel_async();
         let _ = std::process::Command::new("tmux")
             .args(["switch-client", "-t", &local_session])
+            .stderr(std::process::Stdio::null())
             .status();
 
         let escaped = session_name.replace('\'', "'\\''");

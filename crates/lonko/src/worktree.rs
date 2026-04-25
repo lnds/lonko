@@ -187,6 +187,7 @@ pub fn run(cwd: &str, branch: &str) -> anyhow::Result<()> {
     // Switch to the new session
     let _ = Command::new("tmux")
         .args(["switch-client", "-t", &session_name])
+        .stderr(std::process::Stdio::null())
         .status();
 
     Ok(())
@@ -268,6 +269,7 @@ pub fn run_from_pr_number(cwd: &str, number: u32, title: &str) -> anyhow::Result
         let _ = tmux::create_session(&session_name, &wt_str);
         let _ = Command::new("tmux")
             .args(["switch-client", "-t", &session_name])
+            .stderr(std::process::Stdio::null())
             .status();
         return Ok(());
     }
@@ -300,6 +302,7 @@ pub fn run_from_pr_number(cwd: &str, number: u32, title: &str) -> anyhow::Result
 
     let _ = Command::new("tmux")
         .args(["switch-client", "-t", &session_name])
+        .stderr(std::process::Stdio::null())
         .status();
     Ok(())
 }

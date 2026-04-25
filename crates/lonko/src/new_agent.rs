@@ -155,6 +155,7 @@ pub fn run(cwd: &str, prompt: &str) -> anyhow::Result<()> {
     // Switch the user to the new session.
     let _ = Command::new("tmux")
         .args(["switch-client", "-t", &session_name])
+        .stderr(std::process::Stdio::null())
         .status();
 
     Ok(())

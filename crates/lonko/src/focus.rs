@@ -3,7 +3,7 @@
 // The session order is written by the running lonko instance to
 // ~/.cache/lonko-sessions (one pane_id per line, 1-indexed).
 
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn sessions_cache_path() -> std::path::PathBuf {
     crate::state::lonko_cache_dir().join("lonko-sessions")
@@ -44,9 +44,11 @@ pub fn run(n: usize) -> anyhow::Result<()> {
     // focuses the exact pane (and its window) regardless of current session.
     let switch = Command::new("tmux")
         .args(["switch-client", "-t", &pane_id])
+        .stderr(Stdio::null())
         .status();
     let select = Command::new("tmux")
         .args(["select-pane", "-t", &pane_id])
+        .stderr(Stdio::null())
         .status();
 
     match (switch, select) {

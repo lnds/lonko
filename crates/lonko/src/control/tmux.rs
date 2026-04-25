@@ -240,6 +240,7 @@ pub fn focus_session_window(session: &str, window_index: u32) -> anyhow::Result<
     let target = format!("{}:{}", session, window_index);
     let status = Command::new("tmux")
         .args(["switch-client", "-t", &target])
+        .stderr(Stdio::null())
         .status()?;
     if !status.success() {
         anyhow::bail!("tmux switch-client failed for {target}");
