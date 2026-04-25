@@ -1923,25 +1923,34 @@ impl App {
                 return;
             }
 
-            // Try to clean up merged branches if we have the necessary info.
-            if let (Some(branch), Some(repo)) = (branch, main_repo)
-                && let Some(result) = crate::worktree::cleanup_merged_branch(&repo, &branch) {
-                    let msg = match (result.local_deleted, result.remote_deleted) {
-                        (true, true) => format!(
-                            "cleaned up local + remote branch '{branch}' (PR merged)"
-                        ),
-                        (true, false) => format!(
-                            "branch '{branch}': local deleted, remote delete failed"
-                        ),
-                        (false, true) => format!(
-                            "branch '{branch}': remote deleted, local delete failed"
-                        ),
-                        (false, false) => format!(
-                            "branch '{branch}': PR merged but branch delete failed"
-                        ),
-                    };
-                    tmux::display_message(&msg);
-                }
+            // Try to clean up the branch left behind by the worktree.
+            if let (Some(branch), Some(repo)) = (branch, main_repo) {
+                let msg = match crate::worktree::cleanup_branch(&repo, &branch) {
+                    crate::worktree::CleanupOutcome::Merged {
+                        local_deleted: true,
+                        remote_deleted: true,
+                    } => format!("cleaned up local + remote branch '{branch}' (PR merged)"),
+                    crate::worktree::CleanupOutcome::Merged {
+                        local_deleted: true,
+                        remote_deleted: false,
+                    } => format!("branch '{branch}': local deleted, remote delete failed"),
+                    crate::worktree::CleanupOutcome::Merged {
+                        local_deleted: false,
+                        remote_deleted: true,
+                    } => format!("branch '{branch}': remote deleted, local delete failed"),
+                    crate::worktree::CleanupOutcome::Merged {
+                        local_deleted: false,
+                        remote_deleted: false,
+                    } => format!("branch '{branch}': PR merged but branch delete failed"),
+                    crate::worktree::CleanupOutcome::SafeDeleted => {
+                        format!("deleted branch '{branch}' (no unique commits)")
+                    }
+                    crate::worktree::CleanupOutcome::Kept => {
+                        format!("kept branch '{branch}' (has unique commits)")
+                    }
+                };
+                tmux::display_message(&msg);
+            }
         });
     }
 

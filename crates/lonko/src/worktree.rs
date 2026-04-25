@@ -425,6 +425,20 @@ pub fn delete_local_branch(repo_cwd: &str, branch: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Delete a local branch only if git considers it fully merged into its
+/// upstream (or HEAD when there is no upstream). Uses `git branch -d`
+/// (lowercase) so unique commits are preserved.
+pub fn delete_local_branch_safe(repo_cwd: &str, branch: &str) -> anyhow::Result<()> {
+    let output = Command::new("git")
+        .args(["-C", repo_cwd, "branch", "-d", branch])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("git branch -d {branch}: {stderr}");
+    }
+    Ok(())
+}
+
 /// Delete the remote tracking branch. Runs `git push origin --delete <branch>`.
 ///
 /// NOTE: assumes the remote is named `origin`. This will fail (harmlessly) for
@@ -440,33 +454,43 @@ pub fn delete_remote_branch(repo_cwd: &str, branch: &str) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Result of post-worktree-removal branch cleanup.
+/// Outcome of post-worktree-removal branch cleanup.
 #[derive(Debug)]
-pub struct CleanupResult {
-    pub local_deleted: bool,
-    pub remote_deleted: bool,
+pub enum CleanupOutcome {
+    /// PR was confirmed merged via `gh`; both local + remote delete were
+    /// attempted (force on local, `--delete` on remote).
+    Merged {
+        local_deleted: bool,
+        remote_deleted: bool,
+    },
+    /// `git branch -d` succeeded — the branch had no commits unique to it.
+    SafeDeleted,
+    /// `git branch -d` refused (branch has unique commits) or the call failed
+    /// for another reason. The branch was kept; no remote action taken.
+    Kept,
 }
 
-/// After a worktree is removed, check if the branch has a merged PR and clean
-/// up local + remote branches if so.
+/// After a worktree is removed, try to clean up the associated branch.
 ///
-/// Returns `None` if cleanup was skipped (no gh, no branch, PR not merged).
-pub fn cleanup_merged_branch(repo_cwd: &str, branch: &str) -> Option<CleanupResult> {
-    if !has_gh() {
-        return None;
+/// Strategy:
+/// - If `gh` is available and the branch's PR is merged, force-delete the
+///   local branch and delete the remote.
+/// - Otherwise, attempt a safe `git branch -d`. Git refuses if the branch has
+///   commits not in upstream, which protects unintegrated work.
+pub fn cleanup_branch(repo_cwd: &str, branch: &str) -> CleanupOutcome {
+    if has_gh() && pr_state_for_branch(repo_cwd, branch) == PrState::Merged {
+        let local_deleted = delete_local_branch(repo_cwd, branch).is_ok();
+        let remote_deleted = delete_remote_branch(repo_cwd, branch).is_ok();
+        return CleanupOutcome::Merged {
+            local_deleted,
+            remote_deleted,
+        };
     }
 
-    if pr_state_for_branch(repo_cwd, branch) != PrState::Merged {
-        return None;
+    match delete_local_branch_safe(repo_cwd, branch) {
+        Ok(()) => CleanupOutcome::SafeDeleted,
+        Err(_) => CleanupOutcome::Kept,
     }
-
-    let local_deleted = delete_local_branch(repo_cwd, branch).is_ok();
-    let remote_deleted = delete_remote_branch(repo_cwd, branch).is_ok();
-
-    Some(CleanupResult {
-        local_deleted,
-        remote_deleted,
-    })
 }
 
 #[cfg(test)]
@@ -720,8 +744,12 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_merged_branch_non_git_dir_returns_none() {
-        // No gh available in /tmp, or no PR — either way should return None.
-        assert!(cleanup_merged_branch("/tmp", "no-such-branch").is_none());
+    fn cleanup_branch_non_git_dir_returns_kept() {
+        // No PR for this branch and `git branch -d` will fail in /tmp — so
+        // the branch is reported as kept.
+        assert!(matches!(
+            cleanup_branch("/tmp", "no-such-branch"),
+            CleanupOutcome::Kept
+        ));
     }
 }
