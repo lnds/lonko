@@ -72,7 +72,7 @@ impl RemoteBridge {
             anyhow::bail!("bridge ssh to {host} exited immediately (status: {status})");
         }
 
-        tracing::info!("remote bridge to {host} started (forward={forward})");
+        tracing::debug!("remote bridge to {host} started (forward={forward})");
         Ok(Self {
             host: host.to_string(),
             child,
@@ -97,7 +97,7 @@ impl RemoteBridge {
 impl Drop for RemoteBridge {
     fn drop(&mut self) {
         self.shutdown();
-        tracing::info!("remote bridge to {} dropped", self.host);
+        tracing::debug!("remote bridge to {} dropped", self.host);
     }
 }
 

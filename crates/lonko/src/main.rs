@@ -65,27 +65,26 @@ async fn main() -> Result<()> {
 
     // File-backed tracing so debug lines from the bridge, hook handler,
     // etc. go somewhere observable. Respects `LONKO_LOG` (e.g.
-    // `LONKO_LOG=debug`) and defaults to `info`. The log file is kept in
-    // the OS cache dir to avoid polluting $HOME. Creation failures are
-    // swallowed — a lonko without logs still works.
-    let log_path = state::lonko_cache_dir().join("lonko.log");
-    if let Some(parent) = log_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
+    // `LONKO_LOG=debug`) and defaults to `info`. Logs rotate daily as
+    // `lonko.log.YYYY-MM-DD` in the OS cache dir; files older than 7 days
+    // are purged at startup so disk usage stays bounded. Creation
+    // failures are swallowed — a lonko without logs still works.
+    let log_dir = state::lonko_cache_dir();
+    let _ = std::fs::create_dir_all(&log_dir);
+    prune_old_logs(&log_dir, 7);
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "lonko.log");
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     {
         use tracing_subscriber::{fmt, EnvFilter};
         let filter = EnvFilter::try_from_env("LONKO_LOG")
             .unwrap_or_else(|_| EnvFilter::new("info"));
         let _ = fmt()
-            .with_writer(std::sync::Mutex::new(file))
+            .with_writer(non_blocking)
             .with_ansi(false)
             .with_env_filter(filter)
             .try_init();
     }
+    let _log_guard = guard;
 
     let mut terminal = ratatui::init();
     crossterm::execute!(
@@ -105,4 +104,23 @@ async fn main() -> Result<()> {
     )?;
     ratatui::restore();
     result
+}
+
+/// Delete rotated log files whose mtime is older than `max_age_days`.
+/// Matches both the current `lonko.log.YYYY-MM-DD` layout and the old
+/// single-file `lonko.log` from prior versions.
+fn prune_old_logs(dir: &std::path::Path, max_age_days: u64) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let cutoff = std::time::Duration::from_secs(max_age_days * 24 * 60 * 60);
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with("lonko.log") { continue }
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(mtime) = meta.modified() else { continue };
+        let Ok(age) = std::time::SystemTime::now().duration_since(mtime) else { continue };
+        if age > cutoff {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }

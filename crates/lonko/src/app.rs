@@ -1060,7 +1060,7 @@ impl App {
                 self.remote_bridge_starting.remove(&host);
                 match result {
                     Ok(bridge) => {
-                        tracing::info!("remote bridge to {host} ready");
+                        tracing::debug!("remote bridge to {host} ready");
                         self.remote_bridges.insert(host, bridge);
                     }
                     Err(e) => {
@@ -1308,7 +1308,7 @@ impl App {
         // cycle with a fresh spawn).
         self.remote_bridges.retain(|host, bridge| {
             if !desired.contains(host) {
-                tracing::info!("tearing down remote bridge to {host} (not online)");
+                tracing::debug!("tearing down remote bridge to {host} (not online)");
                 return false;
             }
             if !bridge.is_alive() {
