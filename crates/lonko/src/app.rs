@@ -1466,26 +1466,24 @@ impl App {
     }
 
     fn on_session_discovered(&mut self, file: crate::sources::lifecycle::SessionFile) {
-        // The lifecycle file's `sessionId` is stale after `/clear` (Claude Code
-        // does not rewrite it). Prefer the most recent transcript for the cwd
-        // so we pick up the live session instead of a days-old one whose last
-        // prompt is long obsolete.
-        let (transcript_path, session_id) =
+        // Resolve the session's transcript. Prefer the lifecycle file's own
+        // `sessionId` when its transcript still exists on disk — that path
+        // is unambiguous even with N>1 Claudes in the same cwd. Only fall
+        // back to `most_recent_transcript_session` (a cwd-level lookup)
+        // when the lifecycle id was invalidated by `/clear` and its file
+        // is gone; without that fallback, post-`/clear` sessions would
+        // attach to a stale transcript whose last prompt is obsolete.
+        let by_id_path = transcript::transcript_path(&file.cwd, &file.session_id);
+        let (transcript_path, session_id) = if by_id_path.exists() {
+            (by_id_path, file.session_id.clone())
+        } else {
             match transcript::most_recent_transcript_session(&file.cwd) {
                 Some((path, id)) => (path, id),
-                None => (
-                    transcript::transcript_path(&file.cwd, &file.session_id),
-                    file.session_id.clone(),
-                ),
-            };
+                None => (by_id_path, file.session_id.clone()),
+            }
+        };
 
         // If pre-created by hook (pid=0), update with real pid now.
-        //
-        // TODO: `session_id` above comes from
-        // `most_recent_transcript_session(cwd)`, which is a cwd-level
-        // lookup. With N>1 Claudes in the same cwd, `file.pid` can be
-        // attached to the wrong provisional here. Fixing needs a
-        // pid→transcript mapping the on-disk layout does not provide.
         if let Some(s) = self.state.sessions.iter_mut().find(|s| s.id == session_id && s.pid == 0) {
             s.pid = file.pid;
             return;
@@ -1502,13 +1500,17 @@ impl App {
             return;
         }
 
-        // Skip if already tracked by pid, session_id, or pane.
-        let exists = self.state.sessions.iter().any(|s| {
-            s.pid == file.pid
-                || s.id == session_id
-                || (tmux_pane.is_some() && s.tmux_pane == tmux_pane)
-        });
-        if exists { return; }
+        // Decide whether to insert and under what id. `lifecycle_session_id`
+        // skips when this event already maps to a tracked session, and
+        // returns a synthetic `lifecycle:<pid>` when N>1 Claudes in the
+        // same cwd both fell through to the most-recent-transcript fallback
+        // and now collide on `session_id`.
+        let Some(session_id) =
+            self.state
+                .lifecycle_session_id(&session_id, file.pid, tmux_pane.as_deref())
+        else {
+            return;
+        };
 
         let mut session = Session::new(session_id, file.pid, file.cwd.clone());
         session.status = SessionStatus::Idle;
@@ -1870,6 +1872,7 @@ impl App {
         let pid = session.pid;
         let session_id = session.id.clone();
         let branch = session.branch.clone();
+        let repo_root = session.repo_root.clone();
         let pane = session.tmux_pane.clone()
             .or_else(|| tmux::find_pane_for_pid(pid));
 
@@ -1878,6 +1881,17 @@ impl App {
         // only removes the single window, so a worktree agent in a sibling
         // window of lonko's own session can still be safely torn down.
         if self.is_own_tmux_window(pane.as_deref()) {
+            return;
+        }
+
+        // Worktree was removed externally: the cwd no longer exists on disk,
+        // so `is_worktree` and `git worktree remove` would both fail. Tear
+        // down the agent anyway (kill pane + drop from state) and prune the
+        // dangling worktree entry from the main repo so the branch can be
+        // cleaned up. Without this, the agent stays Completed for the prune
+        // TTL and a second `x` is a no-op.
+        if !std::path::Path::new(&cwd).exists() {
+            self.kill_orphan_worktree_agent(&session_id, pane, branch, repo_root);
             return;
         }
 
@@ -1925,6 +1939,73 @@ impl App {
 
             // Try to clean up the branch left behind by the worktree.
             if let (Some(branch), Some(repo)) = (branch, main_repo) {
+                let msg = match crate::worktree::cleanup_branch(&repo, &branch) {
+                    crate::worktree::CleanupOutcome::Merged {
+                        local_deleted: true,
+                        remote_deleted: true,
+                    } => format!("cleaned up local + remote branch '{branch}' (PR merged)"),
+                    crate::worktree::CleanupOutcome::Merged {
+                        local_deleted: true,
+                        remote_deleted: false,
+                    } => format!("branch '{branch}': local deleted, remote delete failed"),
+                    crate::worktree::CleanupOutcome::Merged {
+                        local_deleted: false,
+                        remote_deleted: true,
+                    } => format!("branch '{branch}': remote deleted, local delete failed"),
+                    crate::worktree::CleanupOutcome::Merged {
+                        local_deleted: false,
+                        remote_deleted: false,
+                    } => format!("branch '{branch}': PR merged but branch delete failed"),
+                    crate::worktree::CleanupOutcome::SafeDeleted => {
+                        format!("deleted branch '{branch}' (no unique commits)")
+                    }
+                    crate::worktree::CleanupOutcome::Kept => {
+                        format!("kept branch '{branch}' (has unique commits)")
+                    }
+                };
+                tmux::display_message(&msg);
+            }
+        });
+    }
+
+    /// Tear down an agent whose worktree directory no longer exists on disk.
+    /// Removes the session from state, kills the tmux window, prunes the
+    /// stale worktree administrative entry from the main repo, and tries to
+    /// clean up the orphan branch.
+    fn kill_orphan_worktree_agent(
+        &mut self,
+        session_id: &str,
+        pane: Option<String>,
+        branch: Option<String>,
+        repo_root: Option<String>,
+    ) {
+        if let Some(ref p) = pane {
+            let _ = tmux::send_ctrl_c(p);
+        }
+
+        self.state.sessions.retain(|s| s.id != session_id);
+        let vlen = self.state.visible_len();
+        if vlen > 0 {
+            self.state.selected = self.state.selected.min(vlen - 1);
+        } else {
+            self.state.selected = 0;
+        }
+        self.write_sessions_cache();
+
+        let Some(target_pane) = pane else { return };
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let _ = tmux::kill_window(&target_pane);
+
+            // Drop the dangling worktree entry from the main repo so a later
+            // `git branch -d` doesn't refuse with "branch is checked out".
+            let Some(repo) = repo_root else { return };
+            if let Err(e) = crate::worktree::prune(&repo) {
+                tmux::display_message(&format!("worktree prune: {e}"));
+                return;
+            }
+
+            if let Some(branch) = branch {
                 let msg = match crate::worktree::cleanup_branch(&repo, &branch) {
                     crate::worktree::CleanupOutcome::Merged {
                         local_deleted: true,

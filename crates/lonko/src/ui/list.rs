@@ -205,6 +205,39 @@ pub(crate) fn compute_header_and_collapsed(
     (header_flags, collapsed_flags)
 }
 
+/// For each visible main agent, compute an optional disambiguating suffix
+/// to append to its title when another visible main shares the same
+/// `display_name()`. Uses the tmux pane id (e.g. `(%23)`) so each suffix
+/// is globally unique within the same tmux server.
+///
+/// The most common collision: two agents on `main` of the same repo —
+/// `display_name()` deliberately collapses trunk branches to the repo
+/// name, so without a suffix the cards are visually identical.
+///
+/// Subagents skip the suffix; their own row is rendered compactly under
+/// the parent and a duplicated agent-type label there is not ambiguous.
+pub(crate) fn compute_dup_suffixes(visible: &[&Session]) -> Vec<Option<String>> {
+    use std::collections::HashMap;
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for s in visible.iter() {
+        if !s.is_subagent() {
+            *counts.entry(s.display_name()).or_insert(0) += 1;
+        }
+    }
+    visible
+        .iter()
+        .map(|s| {
+            if s.is_subagent() {
+                return None;
+            }
+            if counts.get(s.display_name()).copied().unwrap_or(0) < 2 {
+                return None;
+            }
+            s.tmux_pane.as_deref().map(|p| format!("({p})"))
+        })
+        .collect()
+}
+
 /// For each session in `visible`, whether a one-line remote divider should
 /// be drawn above it. True only at the first session with `host.is_some()`,
 /// and only when `remote_enabled` is true and at least one local session
@@ -352,6 +385,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let (header_flags, collapsed_flags) = compute_header_and_collapsed(&visible, state);
     let group_keys = compute_group_keys(&visible);
     let remote_sep_flags = compute_remote_sep_flags(&visible, state.remote_enabled);
+    let dup_suffixes = compute_dup_suffixes(&visible);
 
     let (scroll, cards_visible) = compute_scroll(
         &visible, state.selected, list_area.height, &header_flags, &collapsed_flags, &remote_sep_flags, &state.bookmarks,
@@ -509,9 +543,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         };
         let subagent_count = state.subagent_count_for(&session.id);
         let subagents_expanded = state.expanded_subagents.contains(&session.id);
+        let dup_suffix = dup_suffixes.get(global_idx).and_then(|o| o.as_deref());
         render_session_card(frame, chunks[chunk_idx], session, CardCtx {
             selected, focused, tick: state.tick, position, icon, bookmark_note,
             worktree_input, bookmark_input, subagent_count, subagents_expanded,
+            dup_suffix,
         });
     }
 
@@ -545,10 +581,17 @@ struct CardCtx<'a> {
     /// Whether the user has expanded this agent's subagents inline below.
     /// Flips the badge glyph so the toggle direction is visible.
     subagents_expanded: bool,
+    /// Disambiguating suffix appended to the title when another visible
+    /// agent shares the same display name (e.g. two agents on `main`).
+    dup_suffix: Option<&'a str>,
 }
 
 fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: CardCtx<'_>) {
-    let CardCtx { selected, focused, tick, position, icon, bookmark_note, worktree_input, bookmark_input, subagent_count, subagents_expanded } = ctx;
+    let CardCtx {
+        selected, focused, tick, position, icon, bookmark_note,
+        worktree_input, bookmark_input, subagent_count, subagents_expanded,
+        dup_suffix,
+    } = ctx;
     if session.is_subagent() {
         render_subagent_row(frame, area, session, selected, focused);
         return;
@@ -635,12 +678,15 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
     // Truncate name/branch so neither overflows the card width.
     // Prefix occupies ~7 columns: border(2) + avatar(4) + space(1).
     let name_budget = area.width.saturating_sub(7) as usize;
-    let display = session.display_name();
-    let name_w = UnicodeWidthStr::width(display);
+    let display: String = match dup_suffix {
+        Some(suf) => format!("{} {suf}", session.display_name()),
+        None => session.display_name().to_string(),
+    };
+    let name_w = UnicodeWidthStr::width(display.as_str());
     let branch_w = UnicodeWidthStr::width(branch_str.as_str());
 
     let (name_display, branch_display) = if name_w + branch_w <= name_budget {
-        (display.to_string(), branch_str)
+        (display, branch_str)
     } else {
         // Prioritize showing the branch; truncate name first, then branch.
         let min_name = 6usize;
@@ -648,7 +694,7 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
             .saturating_sub(branch_w)
             .max(min_name)
             .min(name_budget); // never exceed total budget
-        let truncated_name = truncate_cols(display, name_max);
+        let truncated_name = truncate_cols(&display, name_max);
         let used = UnicodeWidthStr::width(truncated_name.as_str());
         let branch_max = name_budget.saturating_sub(used);
         let truncated_branch = if branch_max == 0 {
@@ -1143,5 +1189,74 @@ mod tests {
         // "ab修" = 4 cols ≤ 5 ✓, next "复" = 2 cols → 6 > 5, stop
         // result: "ab修…" = 5 cols
         assert_eq!(truncate_cols("ab修复cd", 6), "ab修…");
+    }
+
+    fn main_on_trunk(id: &str, repo: &str, pane: &str) -> Session {
+        // Two agents on `main` of the same repo collapse to identical
+        // `display_name()` (the repo name), so the suffix logic can fire
+        // only when their pane ids differ.
+        let mut s = main_with_repo(id, repo);
+        s.branch = Some("main".into());
+        s.tmux_pane = Some(pane.into());
+        s
+    }
+
+    #[test]
+    fn dup_suffixes_single_main_returns_none() {
+        let s = main_on_trunk("a", "/r/lonko", "%1");
+        let visible = vec![&s];
+        assert_eq!(compute_dup_suffixes(&visible), vec![None]);
+    }
+
+    #[test]
+    fn dup_suffixes_two_agents_on_main_get_pane_suffix() {
+        let a = main_on_trunk("a", "/r/lonko", "%1");
+        let b = main_on_trunk("b", "/r/lonko", "%2");
+        let visible = vec![&a, &b];
+        assert_eq!(
+            compute_dup_suffixes(&visible),
+            vec![Some("(%1)".into()), Some("(%2)".into())],
+        );
+    }
+
+    #[test]
+    fn dup_suffixes_distinct_display_names_no_suffix() {
+        // Same repo but different non-trunk branches → distinct
+        // display_name → no collision, no suffix.
+        let mut a = main_with_repo("a", "/r/lonko");
+        a.branch = Some("feat/one".into());
+        a.tmux_pane = Some("%1".into());
+        let mut b = main_with_repo("b", "/r/lonko");
+        b.branch = Some("feat/two".into());
+        b.tmux_pane = Some("%2".into());
+        let visible = vec![&a, &b];
+        assert_eq!(compute_dup_suffixes(&visible), vec![None, None]);
+    }
+
+    #[test]
+    fn dup_suffixes_skips_subagents() {
+        // A subagent inheriting the parent's project_name might collide on
+        // display_name with another visible session, but subagents have
+        // their own compact row and shouldn't get a suffix.
+        let parent = main_on_trunk("p", "/r/lonko", "%1");
+        let sub = subagent_of("s", "p", "/r/lonko");
+        let visible = vec![&parent, &sub];
+        let suffixes = compute_dup_suffixes(&visible);
+        assert_eq!(suffixes[1], None, "subagent must not receive a suffix");
+    }
+
+    #[test]
+    fn dup_suffixes_no_pane_returns_none_even_on_collision() {
+        // If the agent has no tmux pane (provisional / lifecycle-only), we
+        // can't synthesize a stable discriminator. Fall through to None
+        // rather than fabricate a misleading label.
+        let mut a = main_on_trunk("a", "/r/lonko", "%1");
+        a.tmux_pane = None;
+        let b = main_on_trunk("b", "/r/lonko", "%2");
+        let visible = vec![&a, &b];
+        assert_eq!(
+            compute_dup_suffixes(&visible),
+            vec![None, Some("(%2)".into())],
+        );
     }
 }

@@ -347,6 +347,22 @@ pub fn is_worktree(cwd: &str) -> bool {
     }
 }
 
+/// Run `git worktree prune` from the main repo to drop stale administrative
+/// entries under `.git/worktrees/` whose working tree no longer exists.
+/// Used when an agent's worktree directory was removed externally and we
+/// need git to forget the dangling reference before deleting the branch.
+pub fn prune(main_repo: &str) -> anyhow::Result<()> {
+    let out = Command::new("git")
+        .args(["-C", main_repo, "worktree", "prune"])
+        .output()?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let first = stderr.lines().next().unwrap_or("git worktree prune failed");
+        anyhow::bail!("git worktree prune in {main_repo}: {first}");
+    }
+    Ok(())
+}
+
 /// Remove a git worktree. Finds the main repo via `repo_common_root` and
 /// runs `git worktree remove --force` from there.
 pub fn remove(cwd: &str) -> anyhow::Result<()> {
@@ -741,6 +757,55 @@ mod tests {
         assert!(delete_remote_branch(repo.to_str().unwrap(), "nonexistent-branch-xyz-999").is_err());
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn prune_succeeds_in_valid_repo_and_drops_dangling_entry() {
+        // Build a tiny standalone repo, add a worktree, delete the worktree
+        // dir from disk, and confirm `prune` reports success and removes the
+        // administrative entry under `.git/worktrees/`.
+        let tmp = std::env::temp_dir().join("lonko-test-worktree-prune");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let repo = tmp.join("repo");
+        let repo_str = repo.to_str().unwrap();
+        assert!(Command::new("git").args(["init"]).arg(&repo).output().unwrap().status.success());
+        for (k, v) in [
+            ("commit.gpgsign", "false"),
+            ("tag.gpgsign", "false"),
+            ("user.email", "test@example.com"),
+            ("user.name", "lonko-test"),
+        ] {
+            assert!(Command::new("git")
+                .args(["-C", repo_str, "config", "--local", k, v])
+                .output().unwrap().status.success());
+        }
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        assert!(Command::new("git").args(["-C", repo_str, "add", "."]).output().unwrap().status.success());
+        assert!(Command::new("git").args(["-C", repo_str, "commit", "-m", "init"]).output().unwrap().status.success());
+
+        let wt = tmp.join("wt");
+        assert!(Command::new("git")
+            .args(["-C", repo_str, "worktree", "add", "-b", "feat-prune"])
+            .arg(&wt)
+            .output().unwrap().status.success());
+
+        let admin = repo.join(".git/worktrees/wt");
+        assert!(admin.is_dir(), "git should have created the worktree admin dir");
+
+        // Simulate external removal: nuke the working tree, leave the admin
+        // entry behind. `prune` should then drop the admin entry.
+        std::fs::remove_dir_all(&wt).unwrap();
+        prune(repo_str).expect("prune should succeed in a valid repo");
+        assert!(!admin.exists(), "prune should have dropped the dangling worktree entry");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn prune_non_git_dir_returns_err() {
+        assert!(prune("/tmp").is_err());
     }
 
     #[test]

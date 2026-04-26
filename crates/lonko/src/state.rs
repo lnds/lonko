@@ -1305,7 +1305,7 @@ impl AppState {
                 None => self.sessions.iter_mut().find(|s| {
                     s.tmux_pane.as_deref() == Some(pane)
                         && s.host.is_none()
-                        && s.id.starts_with("tmux:")
+                        && (s.id.starts_with("tmux:") || s.id.starts_with("lifecycle:"))
                 }),
             }
         } else {
@@ -1348,6 +1348,43 @@ impl AppState {
             self.sessions.push(session);
         }
         true
+    }
+
+    /// Decide what to do with an incoming lifecycle event for `(session_id, pid, tmux_pane)`.
+    ///
+    /// Returns `None` when the event maps to a session lonko already tracks
+    /// (matched by pid, by pane, or by id-on-an-unclaimed-provisional). The
+    /// caller should drop the event.
+    ///
+    /// Returns `Some(id)` when a new entry should be inserted, where `id` is
+    /// either the original `session_id` or a synthetic `lifecycle:<pid>` if
+    /// another agent already claimed that id. The collision case shows up
+    /// when N>1 Claudes share a cwd and `most_recent_transcript_session`
+    /// resolves every lifecycle file to the same id.
+    pub fn lifecycle_session_id(
+        &self,
+        session_id: &str,
+        pid: u32,
+        tmux_pane: Option<&str>,
+    ) -> Option<String> {
+        let exists = self.sessions.iter().any(|s| {
+            if s.pid == pid { return true; }
+            if let Some(p) = tmux_pane
+                && s.tmux_pane.as_deref() == Some(p)
+            {
+                return true;
+            }
+            // An unclaimed provisional with the same id was likely
+            // pre-created by an earlier hook for *this* Claude.
+            s.id == session_id && s.pid == 0
+        });
+        if exists {
+            return None;
+        }
+        if self.sessions.iter().any(|s| s.id == session_id) {
+            return Some(format!("lifecycle:{pid}"));
+        }
+        Some(session_id.to_string())
     }
 
     /// If focused_session_id is None, check if the last session matches the active pane.
@@ -2674,6 +2711,86 @@ mod tests {
         let mut state = AppState::default();
         assert!(state.resolve_hook_session("s1", None, Some("/proj"), Some(""), None, None));
         assert_eq!(state.sessions[0].transcript_path, None);
+    }
+
+    #[test]
+    fn resolve_hook_session_promotes_lifecycle_provisional() {
+        // A `lifecycle:<pid>` provisional (created when two Claudes in the
+        // same cwd collide on session_id) must be promoted to the real
+        // hook id by pane just like a `tmux:` provisional.
+        let mut state = AppState::default();
+        state.sessions.push(session_with("lifecycle:9999", 9999, Some("%2")));
+
+        assert!(state.resolve_hook_session("real-id", Some("%2"), Some("/proj"), None, None, None));
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].id, "real-id");
+        assert_eq!(state.sessions[0].pid, 9999, "pid should be preserved across promotion");
+    }
+
+    // ── lifecycle_session_id ───────────────────────────────────────────────
+
+    #[test]
+    fn lifecycle_session_id_returns_id_when_no_collision() {
+        let state = AppState::default();
+        assert_eq!(
+            state.lifecycle_session_id("Sx", 100, Some("%1")),
+            Some("Sx".into()),
+        );
+    }
+
+    #[test]
+    fn lifecycle_session_id_skips_when_pid_already_tracked() {
+        let mut state = AppState::default();
+        state.sessions.push(session_with("Sx", 100, Some("%1")));
+        // Same pid → already tracked, drop the lifecycle event.
+        assert_eq!(state.lifecycle_session_id("Sother", 100, Some("%2")), None);
+    }
+
+    #[test]
+    fn lifecycle_session_id_skips_when_pane_already_tracked() {
+        let mut state = AppState::default();
+        state.sessions.push(session_with("Sx", 100, Some("%1")));
+        // Different pid but same pane → already tracked.
+        assert_eq!(state.lifecycle_session_id("Sother", 200, Some("%1")), None);
+    }
+
+    #[test]
+    fn lifecycle_session_id_skips_unclaimed_provisional_with_same_id() {
+        // A hook pre-created an `Sx` provisional with pid=0; this lifecycle
+        // is presumably the matching pid for it. Skip — the caller has
+        // already updated the pid via the earlier `find(s.id == ... && pid == 0)`
+        // path; we don't want to also create a duplicate here.
+        let mut state = AppState::default();
+        let mut provisional = session_with("Sx", 0, Some("%1"));
+        provisional.status = SessionStatus::Idle;
+        state.sessions.push(provisional);
+
+        assert_eq!(state.lifecycle_session_id("Sx", 100, Some("%2")), None);
+    }
+
+    #[test]
+    fn lifecycle_session_id_creates_synthetic_id_on_collision() {
+        // Two Claudes in the same cwd both fall back to the most-recent
+        // transcript and resolve to the same `Sx`. The first one took
+        // `Sx`; the second must NOT be dropped — it gets `lifecycle:<pid>`
+        // until the hook arrives with the real id.
+        let mut state = AppState::default();
+        state.sessions.push(session_with("Sx", 100, Some("%1")));
+
+        // Different pid, different pane, but id collision.
+        assert_eq!(
+            state.lifecycle_session_id("Sx", 200, Some("%2")),
+            Some("lifecycle:200".into()),
+        );
+    }
+
+    #[test]
+    fn lifecycle_session_id_no_pane_still_skips_pid_dup() {
+        // Pane lookup may fail (find_pane_for_pid returns None). The pid
+        // check still guards against duplicates from re-fired lifecycle.
+        let mut state = AppState::default();
+        state.sessions.push(session_with("Sx", 100, None));
+        assert_eq!(state.lifecycle_session_id("Sother", 100, None), None);
     }
 
     // ── try_focus_active_pane ──────────────────────────────────────────────
