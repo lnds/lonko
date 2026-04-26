@@ -1,3 +1,9 @@
+## v0.18.7 (2026-04-26)
+
+### Fix
+
+- harden agent teardown and lifecycle handling for shared cwd
+
 ## v0.18.6 (2026-04-25)
 
 ### Fix
