@@ -1045,6 +1045,15 @@ impl App {
                 self.state.term_height = h;
             }
             Event::PermissionResponse(key) => self.send_permission(&key),
+            Event::TmuxSessionsRefreshed(sessions) => {
+                self.state.tmux_sessions = sessions;
+                let visible_len = self.state.visible_tmux_sessions().len();
+                if visible_len > 0 {
+                    self.state.tmux_selected = self.state.tmux_selected.min(visible_len - 1);
+                } else {
+                    self.state.tmux_selected = 0;
+                }
+            }
             Event::RemoteSnapshot(snapshot) => {
                 self.on_remote_snapshot(snapshot);
             }
@@ -1128,29 +1137,31 @@ impl App {
             self.write_sessions_cache();
         }
         // Refresh tmux sessions list every 2s for the Sessions tab.
-        if self.state.tick % 20 == 3 {
-            let mut sessions = tmux::list_tmux_sessions();
-            // Mark sessions that have a Claude agent running in them.
+        // Runs on a blocking task: the work fans out to ~7 forks (one
+        // `list-sessions`, one `list-windows` per session, plus a single
+        // `list-panes -a` via `session_pane_map` for the has_claude
+        // lookup). It used to block the event loop with ~80 `display-
+        // message` forks per refresh (redundantly nested over window
+        // count). The main loop now only schedules the work; the result
+        // lands as `Event::TmuxSessionsRefreshed`.
+        if self.state.tick % 20 == 3
+            && let Some(ref tx) = self.scan_tx
+        {
             let claude_panes: std::collections::HashSet<String> = self.state.sessions
                 .iter()
                 .filter_map(|s| s.tmux_pane.clone())
                 .collect();
-            for ts in &mut sessions {
-                ts.has_claude = ts.windows.iter().any(|_w| {
-                    // Check if any known Claude pane belongs to this session
-                    claude_panes.iter().any(|pane| {
-                        tmux_session_for_pane(pane).as_deref() == Some(ts.name.as_str())
-                    })
-                });
-            }
-            self.state.tmux_sessions = sessions;
-            // Clamp selection against the filtered/visible list.
-            let visible_len = self.state.visible_tmux_sessions().len();
-            if visible_len > 0 {
-                self.state.tmux_selected = self.state.tmux_selected.min(visible_len - 1);
-            } else {
-                self.state.tmux_selected = 0;
-            }
+            let tx = tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut sessions = tmux::list_tmux_sessions();
+                let pane_map = tmux::session_pane_map();
+                for ts in &mut sessions {
+                    ts.has_claude = pane_map
+                        .get(&ts.name)
+                        .is_some_and(|panes| claude_panes.iter().any(|p| panes.contains(p)));
+                }
+                let _ = tx.send(Event::TmuxSessionsRefreshed(sessions));
+            });
         }
         // Scan tmux panes every 5 seconds to catch new/gone sessions.
         // Remote sessions are excluded: their pane IDs belong to a different
@@ -1165,7 +1176,13 @@ impl App {
                 .filter(|s| s.host.is_none())
                 .filter_map(|s| s.tmux_pane.clone())
                 .collect();
-            tmux_scanner::scan(tx, &known_panes, self.state.own_pane.as_deref());
+            let own_pane = self.state.own_pane.clone();
+            let tx_scan = tx.clone();
+            // pgrep + walks `ps -o ppid=` per claude PID + `tmux list-panes -a`;
+            // taken off the main thread to keep the event loop responsive.
+            tokio::task::spawn_blocking(move || {
+                tmux_scanner::scan(&tx_scan, &known_panes, own_pane.as_deref());
+            });
             // Reap local agents whose Claude process has exited. The scanner
             // only fires TmuxPaneGone for panes that vanished; a phantom whose
             // pane is gone *and* tmux_pane is None (e.g. lifecycle-only

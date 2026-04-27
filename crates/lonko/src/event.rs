@@ -22,6 +22,10 @@ pub enum Event {
     TmuxPaneGone { pane_id: String },
     /// A permission response received via the control socket (y/n/w → 1/2/3)
     PermissionResponse(String),
+    /// Refreshed list of local tmux sessions, computed off the main
+    /// thread by a `spawn_blocking` task. Replaces the synchronous
+    /// in-tick refresh that was forking ~80 tmux processes every 2s.
+    TmuxSessionsRefreshed(Vec<crate::state::TmuxSession>),
     /// A snapshot of tmux sessions from a remote Tailnet host
     RemoteSnapshot(crate::sources::remote_tmux::RemoteSnapshot),
     /// The set of hostnames that were online during the latest Tailnet poll.

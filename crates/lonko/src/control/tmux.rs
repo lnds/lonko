@@ -305,6 +305,30 @@ pub fn list_windows_for_session(session: &str) -> Vec<crate::state::TmuxWindow> 
         .collect()
 }
 
+/// One-shot map of `session_name → set of pane IDs` for every pane on
+/// the local tmux server. Replaces per-pane `tmux_session_for_pane`
+/// shell-outs in the Sessions-tab refresh: a single fork instead of
+/// one per (session, pane) pair (used to be ~80 forks every 2s).
+pub fn session_pane_map() -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+    let Ok(output) = Command::new("tmux")
+        .args(["list-panes", "-a", "-F", "#{session_name}\x01#{pane_id}"])
+        .output()
+    else {
+        return Default::default();
+    };
+    let mut map: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        Default::default();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut p = line.splitn(2, '\x01');
+        if let (Some(s), Some(pane)) = (p.next(), p.next()) {
+            map.entry(s.trim().to_string())
+                .or_default()
+                .insert(pane.trim().to_string());
+        }
+    }
+    map
+}
+
 /// Return the session name that owns a given pane ID.
 pub fn tmux_session_for_pane(pane_id: &str) -> Option<String> {
     let output = Command::new("tmux")
