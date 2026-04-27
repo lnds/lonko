@@ -2,38 +2,59 @@ use std::process::{Command, Stdio};
 
 use crate::agents::claude;
 
-/// Switch the current tmux client to the target pane's session/window.
+/// Switch the target tmux client to the target pane's session/window.
+/// When `find_main_client()` returns a client name we pin the switch
+/// with `-c <client>` so that on multi-client setups (e.g. several
+/// Ghostty tabs each with its own tmux attach) tmux moves the client
+/// the user is actually on, not whatever "best" one tmux happens to
+/// pick. Without `-c`, tmux can switch the wrong client and leave the
+/// user's terminal stuck on a 1-window session, which then breaks
+/// `prefix N` window switching ("can't find window 2").
 ///
 /// Swallows stderr so tmux's "can't find pane" (hit on remote pane IDs
 /// that do not exist on this server) does not bleed onto the TUI's
 /// alternate screen buffer.
 pub fn focus_pane(pane_id: &str) -> anyhow::Result<()> {
-    let status = Command::new("tmux")
-        .args(["switch-client", "-t", pane_id])
-        .stderr(Stdio::null())
-        .status()?;
+    let mut cmd = Command::new("tmux");
+    cmd.arg("switch-client");
+    if let Some(client) = find_main_client() {
+        cmd.args(["-c", &client]);
+    }
+    cmd.args(["-t", pane_id]).stderr(Stdio::null());
+    let status = cmd.status()?;
     if !status.success() {
         anyhow::bail!("tmux switch-client failed for pane {pane_id}");
     }
     Ok(())
 }
 
-/// Return the name of a tmux client that is NOT attached to lonko-tray.
+/// Return the name of the most-recently-active tmux client that is NOT
+/// attached to `lonko-tray`. Activity is `client_activity` (a Unix
+/// timestamp tmux updates when the client sends input), so this picks
+/// the client the user is currently interacting with — the right
+/// target for `switch-client -c <client>` from inside lonko.
 pub fn find_main_client() -> Option<String> {
     let output = Command::new("tmux")
-        .args(["list-clients", "-F", "#{client_name} #{session_name}"])
+        .args(["list-clients", "-F", "#{client_name}\x01#{session_name}\x01#{client_activity}"])
         .output()
         .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut best: Option<(String, u64)> = None;
     for line in stdout.lines() {
-        let mut parts = line.splitn(2, ' ');
-        let client  = parts.next()?.to_string();
+        let mut parts = line.splitn(3, '\x01');
+        let client = parts.next()?.trim().to_string();
         let session = parts.next()?.trim();
-        if session != "lonko-tray" {
-            return Some(client);
+        let activity: u64 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        if session == "lonko-tray" {
+            continue;
+        }
+        match &best {
+            None => best = Some((client, activity)),
+            Some((_, prev)) if activity > *prev => best = Some((client, activity)),
+            _ => {}
         }
     }
-    None
+    best.map(|(c, _)| c)
 }
 
 /// Focus a pane (select it as active). Silences stderr — see `focus_pane`.

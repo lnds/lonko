@@ -134,10 +134,20 @@ pub fn attach_remote_agent(host: &str, pane_id: &str) {
     // `client-session-changed`) still sees it.
     write_no_follow_sentinel();
     refresh_no_follow_sentinel_async();
-    let _ = std::process::Command::new("tmux")
-        .args(["switch-client", "-t", &local_session])
-        .stderr(std::process::Stdio::null())
-        .status();
+    // Pin the switch to the most-recently-active client (`-c <client>`):
+    // on multi-client setups (Ghostty tabs each with its own tmux
+    // attach) tmux otherwise picks an arbitrary client and the user's
+    // terminal can stay on a 1-window session, breaking `prefix N`
+    // window switching afterwards.
+    {
+        let mut cmd = std::process::Command::new("tmux");
+        cmd.arg("switch-client");
+        if let Some(client) = tmux::find_main_client() {
+            cmd.args(["-c", &client]);
+        }
+        cmd.args(["-t", &local_session]).stderr(std::process::Stdio::null());
+        let _ = cmd.status();
+    }
 
     // Ask the remote tmux to move to the session containing pane_id.
     let pane_escaped = pane_id.replace('\'', "'\\''");
@@ -581,10 +591,13 @@ impl App {
                 let _ = tmux::focus_session_window(&name, window.index);
                 return;
             }
-        let _ = std::process::Command::new("tmux")
-            .args(["switch-client", "-t", &name])
-            .stderr(std::process::Stdio::null())
-            .status();
+        let mut cmd = std::process::Command::new("tmux");
+        cmd.arg("switch-client");
+        if let Some(client) = tmux::find_main_client() {
+            cmd.args(["-c", &client]);
+        }
+        cmd.args(["-t", &name]).stderr(std::process::Stdio::null());
+        let _ = cmd.status();
     }
 
     /// Toggle exclusion of the host under the cursor in the Remote tab.
@@ -622,13 +635,20 @@ impl App {
         ensure_remote_host_session(host, &local_session);
 
         // See `attach_remote_agent`: suppress the follow script so lonko
-        // stays put when we switch-client into `remote/<host>`.
+        // stays put when we switch-client into `remote/<host>`. Pin to
+        // the currently-active client so multi-client setups don't end
+        // up with the wrong terminal stuck on a 1-window session.
         write_no_follow_sentinel();
         refresh_no_follow_sentinel_async();
-        let _ = std::process::Command::new("tmux")
-            .args(["switch-client", "-t", &local_session])
-            .stderr(std::process::Stdio::null())
-            .status();
+        {
+            let mut cmd = std::process::Command::new("tmux");
+            cmd.arg("switch-client");
+            if let Some(client) = tmux::find_main_client() {
+                cmd.args(["-c", &client]);
+            }
+            cmd.args(["-t", &local_session]).stderr(std::process::Stdio::null());
+            let _ = cmd.status();
+        }
 
         let escaped = session_name.replace('\'', "'\\''");
         let _ = std::process::Command::new("ssh")
