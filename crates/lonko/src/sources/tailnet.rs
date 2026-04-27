@@ -97,7 +97,15 @@ fn resolve_tailscale_bin() -> String {
 /// contains an executable file named `name`, joined into a full path.
 /// We avoid pulling in a `which` crate just for this one call site.
 fn which(name: &str) -> Option<String> {
-    let path = std::env::var_os("PATH")?;
+    which_in(name, std::env::var_os("PATH"))
+}
+
+/// Same as `which` but takes the `PATH` value explicitly. Lifted out
+/// so unit tests can pass a deterministic PATH string instead of
+/// mutating the process-wide env (which races with other tests when
+/// `cargo test` runs in parallel — the default).
+fn which_in(name: &str, path: Option<std::ffi::OsString>) -> Option<String> {
+    let path = path?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(name);
         if candidate.is_file() {
@@ -272,30 +280,19 @@ mod tests {
         // /bin/sh is required to exist on every POSIX system the test runs on.
         let dir = Path::new("/bin");
         assert!(dir.join("sh").is_file(), "test precondition");
-        // Force PATH so the lookup is deterministic regardless of the
-        // user's shell config.
-        // SAFETY: tests in this module run sequentially; we restore PATH below.
-        let saved = std::env::var_os("PATH");
-        // SAFETY: single-threaded test mutating process env.
-        unsafe { std::env::set_var("PATH", "/bin"); }
-        let resolved = which("sh");
-        if let Some(prev) = saved {
-            // SAFETY: see above.
-            unsafe { std::env::set_var("PATH", prev); }
-        }
+        // Pass PATH explicitly to `which_in` instead of mutating the
+        // process-wide env — that races with parallel tests under
+        // default `cargo test`.
+        let resolved = which_in("sh", Some(std::ffi::OsString::from("/bin")));
         assert_eq!(resolved.as_deref(), Some("/bin/sh"));
     }
 
     #[test]
     fn which_returns_none_when_path_lacks_binary() {
-        let saved = std::env::var_os("PATH");
-        // SAFETY: see comment in `which_finds_known_executable_in_path`.
-        unsafe { std::env::set_var("PATH", "/nonexistent-dir-for-lonko-test"); }
-        let resolved = which("definitely-not-a-real-binary-xyzzy");
-        if let Some(prev) = saved {
-            // SAFETY: see above.
-            unsafe { std::env::set_var("PATH", prev); }
-        }
+        let resolved = which_in(
+            "definitely-not-a-real-binary-xyzzy",
+            Some(std::ffi::OsString::from("/nonexistent-dir-for-lonko-test")),
+        );
         assert!(resolved.is_none());
     }
 }

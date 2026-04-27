@@ -239,8 +239,21 @@ pub struct App {
     /// When that backlog drains, paired clicks can re-trigger the
     /// double-click action on whatever happens to be selected next.
     /// Inside this lockout window we degrade subsequent clicks to
-    /// plain selection so a slow attach can't multi-fire.
+    /// plain selection so a slow attach can't multi-fire. The stamp
+    /// is taken AFTER the action returns (not before) so the lockout
+    /// covers the entire backlog of clicks that arrived during the
+    /// blocking work.
     last_action_at: Option<std::time::Instant>,
+    /// In-flight guard for the per-2 s `TmuxSessionsRefreshed` job and
+    /// the per-5 s `tmux_scanner::scan` job. Both run on
+    /// `spawn_blocking`; without these flags a slow tmux server
+    /// (think NFS home, hung process) would let successive ticks pile
+    /// new blocking tasks on top of the previous ones, draining as a
+    /// burst of redundant state updates when tmux finally answers.
+    /// Each flag is cleared by the spawned task on completion (panic
+    /// or otherwise) via a guard struct.
+    sessions_refresh_inflight: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    tmux_scan_inflight: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Monotonic counter shared with pending focus tasks; increment to cancel stale spawns.
     focus_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// SSH reverse-tunnel bridges keyed by host. One child `ssh -N -R`
@@ -274,6 +287,8 @@ impl App {
             scan_tx: None,
             last_click: None,
             last_action_at: None,
+            sessions_refresh_inflight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tmux_scan_inflight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             focus_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             remote_bridges: std::collections::HashMap::new(),
             remote_bridge_starting: std::collections::HashSet::new(),
@@ -458,16 +473,26 @@ impl App {
         //
         // Lockout: the focus/attach action is synchronous and can take
         // 1-3 s. Anything the user clicks during that window queues up
-        // and drains all at once when the action returns. Within
-        // ACTION_LOCKOUT_MS of the last fire we degrade to plain
-        // selection so the queued clicks can't multi-trigger.
+        // and drains all at once when the action returns. The lockout
+        // window is stamped AFTER the action returns (see below) so it
+        // covers the entire backlog regardless of how long the action
+        // ran. Within `ACTION_LOCKOUT_MS` of the last completion we
+        // degrade clicks to plain selection so they can't multi-trigger.
         const ACTION_LOCKOUT_MS: u128 = 1000;
         let now = std::time::Instant::now();
         let in_lockout = self.last_action_at
             .is_some_and(|t| now.duration_since(t).as_millis() < ACTION_LOCKOUT_MS);
-        let click_id = self.state.sessions.get(global_idx)
-            .map(|s| s.id.clone())
-            .unwrap_or_default();
+        // Identify the row by its session id; `None` means the index is
+        // out of bounds (list shrunk between layout and click). Reject
+        // empty ids on the second click so two clicks on a "missing"
+        // row don't accidentally satisfy `last_id == &click_id` and
+        // fire the action against `selected_session()`.
+        let click_id = self.state.sessions.get(global_idx).map(|s| s.id.clone());
+        if click_id.is_none() {
+            self.last_click = None;
+            return;
+        }
+        let click_id = click_id.unwrap();
         let is_double = !in_lockout
             && self.last_click
                 .as_ref()
@@ -480,11 +505,11 @@ impl App {
         self.last_click = Some((Tab::Agents, global_idx, now, click_id));
 
         if is_double {
-            // Stamp the lockout BEFORE firing the synchronous action so
-            // any clicks the user made during it (which queue on the
-            // event channel and drain when control returns here) are
-            // already past the cutoff and skip back to plain selection.
-            self.last_action_at = Some(now);
+            // Clear the previous click so the next user click starts
+            // fresh. The lockout timestamp itself is stamped AFTER the
+            // synchronous action returns (see end of this branch); a
+            // pre-stamp would expire halfway through a 3 s attach and
+            // still let some queued clicks slip past.
             self.last_click = None;
             self.state.selected = global_idx;
             let session = self.state.selected_session().cloned();
@@ -495,6 +520,7 @@ impl App {
                     if let Some(pane) = session.tmux_pane.as_deref() {
                         attach_remote_agent(host, pane);
                     }
+                    self.last_action_at = Some(std::time::Instant::now());
                     return;
                 }
                 let pid = session.pid;
@@ -524,6 +550,7 @@ impl App {
                             let _ = tmux::select_pane(&p);
                         }
                     });
+                    self.last_action_at = Some(std::time::Instant::now());
                 }
             }
         } else {
@@ -576,8 +603,12 @@ impl App {
             .is_some_and(|t| now.duration_since(t).as_millis() < ACTION_LOCKOUT_MS);
         let click_id = self.state.visible_tmux_sessions()
             .get(global_idx)
-            .map(|s| s.name.clone())
-            .unwrap_or_default();
+            .map(|s| s.name.clone());
+        if click_id.is_none() {
+            self.last_click = None;
+            return;
+        }
+        let click_id = click_id.unwrap();
         let is_double = !in_lockout
             && self.last_click
                 .as_ref()
@@ -602,17 +633,17 @@ impl App {
         };
 
         if is_double {
-            // Stamp lockout before firing — see the Agents-tab handler
-            // for the rationale. Clears `last_click` so the next user
-            // click is treated as a fresh first click, not a stale
-            // pair member.
-            self.last_action_at = Some(now);
+            // Clear the previous click and stamp the lockout AFTER the
+            // synchronous action returns (`focus_tmux_session` issues a
+            // switch-client) so the lockout window covers any clicks
+            // that arrived during the action.
             self.last_click = None;
             self.state.tmux_selected = global_idx;
             if let Some(win) = window_row {
                 self.state.tmux_window_cursor = Some(win);
             }
             self.focus_tmux_session();
+            self.last_action_at = Some(std::time::Instant::now());
             return;
         }
 
@@ -778,9 +809,16 @@ impl App {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        // Ensure lonko-tray exists. Silence stdio so tmux's "can't find session"
-        // (expected when the tray hasn't been created yet) and similar messages
-        // don't bleed onto the TUI alternate screen.
+        // Ensure lonko-tray exists. We bootstrap with a non-shell
+        // placeholder pane (`tail -f /dev/null`) instead of letting
+        // tmux fork a default zsh: a backgrounded shell would linger
+        // in lonko-tray after lonko's pane is broken in alongside it,
+        // and survive every subsequent break/join cycle. Worse, when
+        // the user later closes lonko (Ctrl-C), the orphan shell can
+        // be the one that ends up promoted to the visible pane via
+        // tmux's own pane bookkeeping. Capture the placeholder's pane
+        // id and kill it immediately after lonko's pane lands inside,
+        // so lonko-tray ends up with exactly one pane: lonko itself.
         let tray_exists = std::process::Command::new("tmux")
             .args(["has-session", "-t", "lonko-tray"])
             .stdout(std::process::Stdio::null())
@@ -788,18 +826,39 @@ impl App {
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
+        let mut placeholder_pane: Option<String> = None;
         if !tray_exists {
-            let _ = std::process::Command::new("tmux")
-                .args(["new-session", "-d", "-s", "lonko-tray"])
-                .stdout(std::process::Stdio::null())
+            let out = std::process::Command::new("tmux")
+                .args([
+                    "new-session", "-d", "-s", "lonko-tray",
+                    "-P", "-F", "#{pane_id}",
+                    "tail", "-f", "/dev/null",
+                ])
                 .stderr(std::process::Stdio::null())
-                .status();
+                .output()
+                .ok();
+            placeholder_pane = out
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
         }
 
         let _ = std::process::Command::new("tmux")
             .args(["break-pane", "-d", "-s", own, "-t", "lonko-tray:"])
             .stderr(std::process::Stdio::null())
             .status();
+
+        // Drop the bootstrap placeholder now that lonko's pane is in
+        // residence. Last-pane semantics on tmux would destroy the
+        // session if we killed the placeholder before break-pane, so
+        // ordering matters here.
+        if let Some(ph) = placeholder_pane {
+            let _ = std::process::Command::new("tmux")
+                .args(["kill-pane", "-t", &ph])
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
 
         // Restore the window's saved layout (undoes the distortion that happened
         // when lonko was added to this window). Drops the layout file on success.
@@ -1257,13 +1316,26 @@ impl App {
         // lands as `Event::TmuxSessionsRefreshed`.
         if self.state.tick % 20 == 3
             && let Some(ref tx) = self.scan_tx
+            && !self.sessions_refresh_inflight.load(std::sync::atomic::Ordering::SeqCst)
         {
             let claude_panes: std::collections::HashSet<String> = self.state.sessions
                 .iter()
                 .filter_map(|s| s.tmux_pane.clone())
                 .collect();
             let tx = tx.clone();
+            self.sessions_refresh_inflight.store(true, std::sync::atomic::Ordering::SeqCst);
+            let inflight = self.sessions_refresh_inflight.clone();
             tokio::task::spawn_blocking(move || {
+                // Always clear the in-flight flag, even on panic, so a
+                // blip doesn't leave the refresh permanently stuck.
+                struct Guard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+                impl Drop for Guard {
+                    fn drop(&mut self) {
+                        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                let _g = Guard(inflight);
+
                 let mut sessions = tmux::list_tmux_sessions();
                 let pane_map = tmux::session_pane_map();
                 for ts in &mut sessions {
@@ -1281,6 +1353,7 @@ impl App {
         // out of the Agents list).
         if self.state.tick.is_multiple_of(50)
             && let Some(ref tx) = self.scan_tx
+            && !self.tmux_scan_inflight.load(std::sync::atomic::Ordering::SeqCst)
         {
             let known_panes: Vec<String> = self.state.sessions
                 .iter()
@@ -1289,9 +1362,18 @@ impl App {
                 .collect();
             let own_pane = self.state.own_pane.clone();
             let tx_scan = tx.clone();
+            self.tmux_scan_inflight.store(true, std::sync::atomic::Ordering::SeqCst);
+            let inflight = self.tmux_scan_inflight.clone();
             // pgrep + walks `ps -o ppid=` per claude PID + `tmux list-panes -a`;
             // taken off the main thread to keep the event loop responsive.
             tokio::task::spawn_blocking(move || {
+                struct Guard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+                impl Drop for Guard {
+                    fn drop(&mut self) {
+                        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                let _g = Guard(inflight);
                 tmux_scanner::scan(&tx_scan, &known_panes, own_pane.as_deref());
             });
             // Reap local agents whose Claude process has exited. The scanner

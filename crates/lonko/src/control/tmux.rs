@@ -256,13 +256,19 @@ fn is_internal_session(name: &str) -> bool {
     name == "lonko-tray" || name.starts_with("floating-")
 }
 
-/// Switch-client to a specific window within a session.
+/// Switch-client to a specific window within a session. Pinned to the
+/// most-recently-active client (`-c <client>`) for the same reason
+/// `focus_pane` is — multi-client setups otherwise leave the wrong
+/// terminal stranded on a 1-window session.
 pub fn focus_session_window(session: &str, window_index: u32) -> anyhow::Result<()> {
     let target = format!("{}:{}", session, window_index);
-    let status = Command::new("tmux")
-        .args(["switch-client", "-t", &target])
-        .stderr(Stdio::null())
-        .status()?;
+    let mut cmd = Command::new("tmux");
+    cmd.arg("switch-client");
+    if let Some(client) = find_main_client() {
+        cmd.args(["-c", &client]);
+    }
+    cmd.args(["-t", &target]).stderr(Stdio::null());
+    let status = cmd.status()?;
     if !status.success() {
         anyhow::bail!("tmux switch-client failed for {target}");
     }
