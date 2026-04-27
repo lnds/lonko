@@ -533,7 +533,7 @@ impl Default for AppState {
             remote_selected: 0,
             excluded_hosts: HashSet::new(),
             remote_enabled: false,
-            remote_poll_ticks: 100, // 10s default
+            remote_poll_ticks: 300, // 30s default; matches RemoteConfig::default
             pr_picker_mode: false,
             pr_picker_query: String::new(),
             pr_picker_loading: false,

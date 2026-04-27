@@ -38,8 +38,11 @@ pub struct RemoteClaudePane {
 /// Poll a single remote host over SSH and return its tmux sessions.
 ///
 /// Runs a compound shell command over a single SSH connection.
-/// Relies on SSH ControlMaster for connection reuse (configured in
-/// the user's `~/.ssh/config`).
+/// We force `ControlMaster=auto` with a private socket path so polls
+/// reuse a single TCP/auth handshake even when the user's
+/// `~/.ssh/config` does not configure ControlMaster. Each fresh
+/// handshake otherwise adds Tailscale Network-Extension churn that
+/// adds up quickly across multiple peers.
 pub fn poll_host(host: &str) -> Result<RemoteSnapshot> {
     let script = concat!(
         "tmux list-sessions -F '#{session_name}\x01#{session_attached}\x01#{session_activity}' 2>/dev/null;",
@@ -51,11 +54,24 @@ pub fn poll_host(host: &str) -> Result<RemoteSnapshot> {
         "ps -eo pid,ppid,comm 2>/dev/null",
     );
 
+    // Per-user socket dir; overridable via $TMPDIR. `%h` lets one master
+    // serve all polls for the same host, while `%p` keeps non-default
+    // ports on their own socket.
+    let mux_dir = std::env::var("TMPDIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/tmp".to_string());
+    let mux_dir = mux_dir.trim_end_matches('/');
+    let control_path = format!("{mux_dir}/lonko-ssh-mux-%r@%h:%p");
+
     let output = Command::new("ssh")
         .args([
             "-o", "ConnectTimeout=5",
             "-o", "BatchMode=yes",
             "-o", "LogLevel=ERROR",
+            "-o", "ControlMaster=auto",
+            "-o", &format!("ControlPath={control_path}"),
+            "-o", "ControlPersist=600",
             host,
             script,
         ])

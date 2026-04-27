@@ -1192,16 +1192,21 @@ impl App {
             });
         }
 
-        // Tailnet peer discovery runs on the background of every 2s tick
+        // Tailnet peer discovery runs on a background task every 10 s
         // whenever remote support is enabled, independent of the active
-        // tab. The resulting `RemotePeersOnline` event is what keeps
+        // tab. The resulting `RemotePeersOnline` event keeps
         // `sync_remote_bridges` informed — without it, bridges would
         // only come up while the user happens to be looking at the
-        // Remote tab. Tick 1 also fires, so first-time discovery
-        // happens ~100 ms after lonko launches instead of waiting a
-        // full 2 s interval.
+        // Remote tab. Tick 1 still fires so first-time discovery
+        // happens ~100 ms after lonko launches.
+        //
+        // Was 2 s; bumped to 10 s because each call shells out to
+        // `tailscale status --json` and on a degraded Wi-Fi every
+        // invocation pokes Tailscale's Network Extension, which feeds
+        // the `airportd`/`nehelper` storm we hit in the field. Peers
+        // don't appear/disappear that fast — 10 s is plenty for UX.
         if self.state.remote_enabled
-            && (self.state.tick.is_multiple_of(20) || self.state.tick == 1)
+            && (self.state.tick.is_multiple_of(100) || self.state.tick == 1)
             && let Some(ref tx) = self.scan_tx
         {
             let excluded = self.state.excluded_hosts.clone();

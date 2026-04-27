@@ -51,7 +51,15 @@ impl RemoteBridge {
                 "-N",
                 "-o", "BatchMode=yes",
                 "-o", "LogLevel=ERROR",
-                "-o", "ServerAliveInterval=30",
+                // 60 s keepalive (was 30) so the persistent reverse
+                // tunnel stops poking Tailscale's Network Extension
+                // every half-minute per peer. Combined with multiple
+                // peers, the cumulative NE traffic was a measurable
+                // contributor to a Wi-Fi/airportd storm in the field.
+                // Two missed keepalives (= ~120 s) still detects a
+                // dead tunnel before the per-host poll backoff would
+                // re-establish a fresh one.
+                "-o", "ServerAliveInterval=60",
                 "-o", "ServerAliveCountMax=2",
                 "-o", "ExitOnForwardFailure=yes",
                 "-o", "StreamLocalBindUnlink=yes",

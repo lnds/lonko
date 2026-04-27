@@ -3,7 +3,7 @@
 // Example:
 //   [remote]
 //   enabled = true
-//   poll_interval_secs = 10
+//   poll_interval_secs = 30
 //   excluded_hosts = ["printer", "phone"]
 
 use std::collections::HashSet;
@@ -43,7 +43,14 @@ impl Default for RemoteConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            poll_interval_secs: 10,
+            // 30 s is conservative on purpose: each poll spawns an SSH
+            // command per online peer, and on a flaky network the
+            // cumulative traffic through Tailscale's Network Extension
+            // can keep the system's Wi-Fi stack in a feedback loop
+            // (airportd / nehelper churn). Reduce in config.toml when
+            // you need snappier remote-agent updates and the network
+            // can handle it.
+            poll_interval_secs: 30,
         }
     }
 }
@@ -116,7 +123,7 @@ mod tests {
     fn default_config_has_remote_disabled() {
         let config = Config::default();
         assert!(!config.remote.enabled);
-        assert_eq!(config.remote.poll_interval_secs, 10);
+        assert_eq!(config.remote.poll_interval_secs, 30);
     }
 
     #[test]
@@ -127,7 +134,7 @@ mod tests {
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.remote.enabled);
-        assert_eq!(config.remote.poll_interval_secs, 10); // default
+        assert_eq!(config.remote.poll_interval_secs, 30); // default
     }
 
     #[test]
