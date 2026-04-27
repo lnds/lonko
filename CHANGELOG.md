@@ -1,3 +1,9 @@
+## v0.18.9 (2026-04-26)
+
+### Fix
+
+- **remote**: drop tailnet peers named "localhost" from discovery
+
 ## v0.18.8 (2026-04-26)
 
 ### Fix
