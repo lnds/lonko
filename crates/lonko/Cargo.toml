@@ -1,6 +1,6 @@
 [package]
 name = "lonko"
-version = "0.18.7"
+version = "0.18.8"
 edition = "2024"
 description = "TUI dashboard to monitor and control Claude Code sessions"
 license = "MIT"

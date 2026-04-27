@@ -1,3 +1,9 @@
+## v0.18.8 (2026-04-26)
+
+### Fix
+
+- **remote**: resolve tailscale CLI when PATH lacks /usr/local/bin
+
 ## v0.18.7 (2026-04-26)
 
 ### Fix
