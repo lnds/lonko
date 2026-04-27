@@ -232,6 +232,15 @@ pub struct App {
     /// fire the double-click action on a different agent that happens
     /// to have shifted into the original row's index.
     last_click: Option<(Tab, usize, std::time::Instant, String)>,
+    /// When the last focus/attach action fired. `attach_remote_agent`
+    /// and `focus_local_agent_pane` block the event loop for 1-3 s
+    /// (ssh handshakes, switch-client round-trips), and any mouse
+    /// clicks the user made meanwhile queue up on the event channel.
+    /// When that backlog drains, paired clicks can re-trigger the
+    /// double-click action on whatever happens to be selected next.
+    /// Inside this lockout window we degrade subsequent clicks to
+    /// plain selection so a slow attach can't multi-fire.
+    last_action_at: Option<std::time::Instant>,
     /// Monotonic counter shared with pending focus tasks; increment to cancel stale spawns.
     focus_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// SSH reverse-tunnel bridges keyed by host. One child `ssh -N -R`
@@ -264,6 +273,7 @@ impl App {
             state,
             scan_tx: None,
             last_click: None,
+            last_action_at: None,
             focus_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             remote_bridges: std::collections::HashMap::new(),
             remote_bridge_starting: std::collections::HashSet::new(),
@@ -445,21 +455,37 @@ impl App {
         // discovered, completion pruning, etc.); without that check
         // the second click could fire the action on a different agent
         // that happens to have slid into the same global_idx.
+        //
+        // Lockout: the focus/attach action is synchronous and can take
+        // 1-3 s. Anything the user clicks during that window queues up
+        // and drains all at once when the action returns. Within
+        // ACTION_LOCKOUT_MS of the last fire we degrade to plain
+        // selection so the queued clicks can't multi-trigger.
+        const ACTION_LOCKOUT_MS: u128 = 1000;
         let now = std::time::Instant::now();
+        let in_lockout = self.last_action_at
+            .is_some_and(|t| now.duration_since(t).as_millis() < ACTION_LOCKOUT_MS);
         let click_id = self.state.sessions.get(global_idx)
             .map(|s| s.id.clone())
             .unwrap_or_default();
-        let is_double = self.last_click
-            .as_ref()
-            .is_some_and(|(last_tab, last_idx, last_time, last_id)| {
-                *last_tab == Tab::Agents
-                    && *last_idx == global_idx
-                    && last_id == &click_id
-                    && now.duration_since(*last_time).as_millis() < 400
-            });
+        let is_double = !in_lockout
+            && self.last_click
+                .as_ref()
+                .is_some_and(|(last_tab, last_idx, last_time, last_id)| {
+                    *last_tab == Tab::Agents
+                        && *last_idx == global_idx
+                        && last_id == &click_id
+                        && now.duration_since(*last_time).as_millis() < 400
+                });
         self.last_click = Some((Tab::Agents, global_idx, now, click_id));
 
         if is_double {
+            // Stamp the lockout BEFORE firing the synchronous action so
+            // any clicks the user made during it (which queue on the
+            // event channel and drain when control returns here) are
+            // already past the cutoff and skip back to plain selection.
+            self.last_action_at = Some(now);
+            self.last_click = None;
             self.state.selected = global_idx;
             let session = self.state.selected_session().cloned();
             if let Some(session) = session {
@@ -540,20 +566,27 @@ impl App {
         // Double-click detection: two clicks on the same card within
         // 400 ms. The session name is captured (see Agents-tab handler)
         // so a list refresh between the clicks cannot route the action
-        // to a different session that landed at the same index.
+        // to a different session that landed at the same index. The
+        // `last_action_at` lockout (also documented on the Agents-tab
+        // handler) keeps queued clicks from re-firing the action when
+        // the synchronous attach finally returns.
+        const ACTION_LOCKOUT_MS: u128 = 1000;
         let now = std::time::Instant::now();
+        let in_lockout = self.last_action_at
+            .is_some_and(|t| now.duration_since(t).as_millis() < ACTION_LOCKOUT_MS);
         let click_id = self.state.visible_tmux_sessions()
             .get(global_idx)
             .map(|s| s.name.clone())
             .unwrap_or_default();
-        let is_double = self.last_click
-            .as_ref()
-            .is_some_and(|(last_tab, last_idx, last_time, last_id)| {
-                *last_tab == Tab::Sessions
-                    && *last_idx == global_idx
-                    && last_id == &click_id
-                    && now.duration_since(*last_time).as_millis() < 400
-            });
+        let is_double = !in_lockout
+            && self.last_click
+                .as_ref()
+                .is_some_and(|(last_tab, last_idx, last_time, last_id)| {
+                    *last_tab == Tab::Sessions
+                        && *last_idx == global_idx
+                        && last_id == &click_id
+                        && now.duration_since(*last_time).as_millis() < 400
+                });
         self.last_click = Some((Tab::Sessions, global_idx, now, click_id));
 
         let is_selected = global_idx == self.state.tmux_selected;
@@ -569,6 +602,12 @@ impl App {
         };
 
         if is_double {
+            // Stamp lockout before firing — see the Agents-tab handler
+            // for the rationale. Clears `last_click` so the next user
+            // click is treated as a fresh first click, not a stale
+            // pair member.
+            self.last_action_at = Some(now);
+            self.last_click = None;
             self.state.tmux_selected = global_idx;
             if let Some(win) = window_row {
                 self.state.tmux_window_cursor = Some(win);
