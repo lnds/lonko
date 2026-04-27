@@ -121,6 +121,14 @@ fn parse_peers(json: &[u8]) -> Result<Vec<TailnetPeer>> {
             // Exclude any peer whose hostname matches this machine.
             self_hostname.as_deref() != Some(&p.hostname.to_ascii_lowercase())
         })
+        .filter(|p| {
+            // Exclude reserved loopback names. A tailnet peer can be named
+            // anything (e.g. an iOS device the user labelled "localhost"),
+            // but ssh to a bare loopback name always resolves to 127.0.0.1 —
+            // we'd end up polling the local machine and surfacing every
+            // local tmux session a second time as a remote agent.
+            !is_loopback_hostname(&p.hostname)
+        })
         .map(|p| TailnetPeer {
             // Normalise to lowercase so this matches what `lonko-hook
             // --remote-tag <host>` stamps into events (the installer
@@ -145,6 +153,15 @@ fn strip_trailing_dot(mut s: String) -> String {
         s.pop();
     }
     s
+}
+
+/// True when `name` is a reserved loopback alias that ssh would resolve
+/// to the local machine instead of the tailnet peer.
+fn is_loopback_hostname(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "localhost" | "localhost.localdomain" | "127.0.0.1" | "::1"
+    )
 }
 
 #[cfg(test)]
@@ -218,6 +235,36 @@ mod tests {
     fn missing_peer_field_returns_empty_vec() {
         let peers = parse_peers(br#"{}"#).unwrap();
         assert!(peers.is_empty());
+    }
+
+    #[test]
+    fn excludes_peers_named_localhost() {
+        let json = br#"{
+            "Self": { "HostName": "selfhost" },
+            "Peer": {
+                "nodekey:aaa": {
+                    "HostName": "localhost",
+                    "DNSName": "localhost.example.ts.net.",
+                    "OS": "iOS",
+                    "Online": true
+                },
+                "nodekey:bbb": {
+                    "HostName": "Localhost",
+                    "DNSName": "localhost-2.example.ts.net.",
+                    "OS": "linux",
+                    "Online": true
+                },
+                "nodekey:ccc": {
+                    "HostName": "real-peer",
+                    "DNSName": "real-peer.example.ts.net.",
+                    "OS": "linux",
+                    "Online": true
+                }
+            }
+        }"#;
+        let peers = parse_peers(json).expect("fixture parses");
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].hostname, "real-peer");
     }
 
     #[test]
