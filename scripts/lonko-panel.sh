@@ -6,6 +6,19 @@
 
 TAB_ARG="$1"
 CURRENT_WIN="$(tmux display-message -p '#{window_id}')"
+CURRENT_SESSION="$(tmux display-message -p '#{session_name}')"
+
+# When the user is inside a `remote/<host>` wrapper session the active
+# pane is an SSH attach to the remote tmux, which already shows that
+# host's own lonko panel. Joining the local lonko on top would stack
+# two panels in the same window. Skip silently — the user can press
+# their lonko shortcut inside the remote tmux to toggle the remote
+# panel, or detach (prefix-d) and try again from a local session.
+case "$CURRENT_SESSION" in
+    remote/*)
+        exit 0
+        ;;
+esac
 
 send_tab_key() {
     local pane="$1"

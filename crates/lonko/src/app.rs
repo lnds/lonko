@@ -698,7 +698,17 @@ impl App {
     fn should_self_quit_when_alone(&self) -> bool {
         let Some(own) = self.state.own_pane.as_deref() else { return false };
         let Some(session) = tmux::tmux_session_for_pane(own) else { return false };
-        if session == "lonko-tray" || session.starts_with("floating-") {
+        // `remote/*` is now treated the same as the lonko-internal
+        // sessions: if super+s pulled the local panel into a remote
+        // wrapper window and the SSH attach pane later dies, lonko
+        // would be left alone in `remote/<host>` and auto-hide would
+        // fire while the user only briefly switched away. The user
+        // can re-summon explicitly; we don't want to disappear out
+        // from under them.
+        if session == "lonko-tray"
+            || session.starts_with("floating-")
+            || session.starts_with("remote/")
+        {
             return false;
         }
         let panes = tmux::list_pane_ids_in_session(&session);
@@ -706,7 +716,14 @@ impl App {
         // empty vec when the tmux subprocess fails transiently (server restart,
         // IO error), and we don't want that to self-quit. The genuinely-gone case
         // is already covered by `tmux_session_for_pane` returning None above.
-        !panes.is_empty() && panes.iter().all(|p| p == own)
+        let alone = !panes.is_empty() && panes.iter().all(|p| p == own);
+        if alone {
+            tracing::debug!(
+                "alone-detected: own={own} session={session} panes={:?}",
+                panes
+            );
+        }
+        alone
     }
 
     /// Hide the panel by moving it back to lonko-tray (lonko keeps running).
