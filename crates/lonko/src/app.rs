@@ -225,7 +225,13 @@ pub struct App {
     /// Channel sender stored so handle_event can trigger scans from the tick handler.
     scan_tx: Option<tokio::sync::mpsc::UnboundedSender<Event>>,
     /// Last mouse click: (tab, global_idx, instant) for double-click detection.
-    last_click: Option<(Tab, usize, std::time::Instant)>,
+    /// Last click bookkeeping for double-click detection. The `String`
+    /// is a stable identifier of the row that was clicked (session id
+    /// in the Agents tab, tmux session name in the Sessions tab) so a
+    /// reorder of the underlying list between the two clicks doesn't
+    /// fire the double-click action on a different agent that happens
+    /// to have shifted into the original row's index.
+    last_click: Option<(Tab, usize, std::time::Instant, String)>,
     /// Monotonic counter shared with pending focus tasks; increment to cancel stale spawns.
     focus_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// SSH reverse-tunnel bridges keyed by host. One child `ssh -N -R`
@@ -433,14 +439,25 @@ impl App {
             return;
         }
 
-        // Double-click detection: two clicks on the same card within 400ms → focus
+        // Double-click detection: two clicks on the same card within
+        // 400 ms → focus. The session id is captured to defend against
+        // the agents list reordering between the two clicks (new agent
+        // discovered, completion pruning, etc.); without that check
+        // the second click could fire the action on a different agent
+        // that happens to have slid into the same global_idx.
         let now = std::time::Instant::now();
+        let click_id = self.state.sessions.get(global_idx)
+            .map(|s| s.id.clone())
+            .unwrap_or_default();
         let is_double = self.last_click
             .as_ref()
-            .is_some_and(|(last_tab, last_idx, last_time)| {
-                *last_tab == Tab::Agents && *last_idx == global_idx && now.duration_since(*last_time).as_millis() < 400
+            .is_some_and(|(last_tab, last_idx, last_time, last_id)| {
+                *last_tab == Tab::Agents
+                    && *last_idx == global_idx
+                    && last_id == &click_id
+                    && now.duration_since(*last_time).as_millis() < 400
             });
-        self.last_click = Some((Tab::Agents, global_idx, now));
+        self.last_click = Some((Tab::Agents, global_idx, now, click_id));
 
         if is_double {
             self.state.selected = global_idx;
@@ -520,14 +537,24 @@ impl App {
 
         let row_within_card = row_in_list - card_row_start;
 
-        // Double-click detection: two clicks on the same card within 400ms.
+        // Double-click detection: two clicks on the same card within
+        // 400 ms. The session name is captured (see Agents-tab handler)
+        // so a list refresh between the clicks cannot route the action
+        // to a different session that landed at the same index.
         let now = std::time::Instant::now();
+        let click_id = self.state.visible_tmux_sessions()
+            .get(global_idx)
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
         let is_double = self.last_click
             .as_ref()
-            .is_some_and(|(last_tab, last_idx, last_time)| {
-                *last_tab == Tab::Sessions && *last_idx == global_idx && now.duration_since(*last_time).as_millis() < 400
+            .is_some_and(|(last_tab, last_idx, last_time, last_id)| {
+                *last_tab == Tab::Sessions
+                    && *last_idx == global_idx
+                    && last_id == &click_id
+                    && now.duration_since(*last_time).as_millis() < 400
             });
-        self.last_click = Some((Tab::Sessions, global_idx, now));
+        self.last_click = Some((Tab::Sessions, global_idx, now, click_id));
 
         let is_selected = global_idx == self.state.tmux_selected;
         let is_expanded = is_selected && self.state.tmux_expanded;
@@ -1021,17 +1048,25 @@ impl App {
         match event {
             Event::Tick                                       => {
                 self.on_tick();
-                // Fallback auto-quit check: `TmuxPaneGone` only fires for panes lonko
-                // had tracked as running Claude, so closing a plain shell pane wouldn't
-                // trigger it. Every 2s (20 ticks * 100ms), offset by 11 to avoid
-                // colliding with the other periodic tasks scheduled in on_tick
-                // (% 10 == 1, % 20 == 3, is_multiple_of(10|50)). 3s startup grace.
+                // Fallback alone-detection: `TmuxPaneGone` only fires for
+                // panes lonko had tracked as running Claude, so closing
+                // a plain shell pane wouldn't trigger it. Every 2 s
+                // (20 ticks * 100 ms), offset by 11 to avoid colliding
+                // with the other periodic tasks scheduled in on_tick
+                // (% 10 == 1, % 20 == 3, is_multiple_of(10|50)).
+                // 3 s startup grace.
+                //
+                // Was an auto-*quit*; that lost the agents list and the
+                // remote bridges every time the user happened to close
+                // their last work pane in lonko's session. Now we
+                // auto-*hide* to `lonko-tray` instead, keeping the
+                // process alive so super+s brings it back instantly.
                 if self.state.tick >= 30
                     && self.state.tick % 20 == 11
                     && self.should_self_quit_when_alone()
                 {
-                    tracing::info!("auto-quit: lonko is the only pane left in its tmux session (tick)");
-                    return Ok(true);
+                    tracing::info!("auto-hide: lonko was alone in its tmux session, parking it back in lonko-tray (tick)");
+                    self.hide_panel();
                 }
             }
             Event::SessionDiscovered(file)                    => self.on_session_discovered(file),
@@ -1042,8 +1077,8 @@ impl App {
             Event::TmuxPaneGone { pane_id }                   => {
                 self.state.handle_pane_gone(&pane_id);
                 if self.should_self_quit_when_alone() {
-                    tracing::info!("auto-quit: lonko is the only pane left in its tmux session");
-                    return Ok(true);
+                    tracing::info!("auto-hide: lonko was alone in its tmux session after pane-gone, parking it back in lonko-tray");
+                    self.hide_panel();
                 }
             }
             Event::Key(key)                                   => return self.on_key(key),
