@@ -1545,6 +1545,20 @@ impl App {
 
         tracing::info!("remote support disabled (runtime toggle)");
 
+        // Capture the host set so we can tear down `remote/<host>`
+        // wrapper sessions after the bridges are gone. The wrappers
+        // are created lazily by `ensure_remote_host_session` and
+        // outlive the SSH attach when, e.g., the bridge dies but the
+        // SSH client is still hanging on a keep-alive timeout — leaving
+        // empty wrapper sessions accumulating in tmux until the user
+        // notices and kills them by hand.
+        let hosts: Vec<String> = self
+            .remote_bridges
+            .keys()
+            .chain(self.remote_online_hosts.iter())
+            .cloned()
+            .collect();
+
         // Kill all bridges; the map's Drop impls reap the ssh children.
         self.remote_bridges.clear();
         self.remote_bridge_starting.clear();
@@ -1553,6 +1567,15 @@ impl App {
         self.remote_online_hosts.clear();
         self.state.remote_hosts.clear();
         self.state.remote_selected = 0;
+
+        // Tear down the `remote/<host>` wrapper tmux sessions.
+        for host in hosts {
+            let target = format!("remote/{}", short_host(&host));
+            let _ = std::process::Command::new("tmux")
+                .args(["kill-session", "-t", &target])
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
 
         // Remove every session that belongs to a remote host — both
         // `remote:` provisionals and hook-promoted real sessions.

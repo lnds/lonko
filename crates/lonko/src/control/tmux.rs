@@ -252,8 +252,14 @@ pub fn scan_claude_panes(own_pane: Option<&str>) -> Vec<ClaudePaneInfo> {
 // ── Session listing ─────────────────────────────────────────────────────────────
 
 /// Sessions that lonko creates internally — exclude from the Sessions tab.
+/// `remote/<host>` wrappers are created lazily by `ensure_remote_host_session`
+/// to host SSH attaches into peer tmux servers; they are not user-owned
+/// sessions and would otherwise accumulate in the listing the longer the
+/// user runs lonko on a tailnet.
 fn is_internal_session(name: &str) -> bool {
-    name == "lonko-tray" || name.starts_with("floating-")
+    name == "lonko-tray"
+        || name.starts_with("floating-")
+        || name.starts_with("remote/")
 }
 
 /// Switch-client to a specific window within a session. Pinned to the
