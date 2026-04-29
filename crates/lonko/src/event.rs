@@ -26,6 +26,10 @@ pub enum Event {
     /// thread by a `spawn_blocking` task. Replaces the synchronous
     /// in-tick refresh that was forking ~80 tmux processes every 2s.
     TmuxSessionsRefreshed(Vec<crate::state::TmuxSession>),
+    /// Result of the per-second `tmux::active_pane()` poll, computed
+    /// off the main thread. Pane ID may be `None` when tmux is between
+    /// states (server restart, no clients attached).
+    ActivePaneRefreshed(Option<String>),
     /// A snapshot of tmux sessions from a remote Tailnet host
     RemoteSnapshot(crate::sources::remote_tmux::RemoteSnapshot),
     /// The set of hostnames that were online during the latest Tailnet poll.

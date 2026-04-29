@@ -263,6 +263,13 @@ pub struct App {
     /// or otherwise) via a guard struct.
     sessions_refresh_inflight: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tmux_scan_inflight: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// In-flight guard for the per-second `active_pane()` poll. The two
+    /// tmux forks (`list-clients` + `display-message`) used to run on
+    /// the event loop, blocking the render every second whenever tmux
+    /// was busy. Now scheduled on `spawn_blocking`, with this flag
+    /// preventing successive ticks from stacking new tasks while the
+    /// previous one is still running.
+    active_pane_inflight: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Monotonic counter shared with pending focus tasks; increment to cancel stale spawns.
     focus_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// SSH reverse-tunnel bridges keyed by host. One child `ssh -N -R`
@@ -310,6 +317,7 @@ impl App {
             last_action_at: None,
             sessions_refresh_inflight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tmux_scan_inflight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            active_pane_inflight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             focus_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             remote_bridges: std::collections::HashMap::new(),
             remote_bridge_starting: std::collections::HashSet::new(),
@@ -1280,6 +1288,17 @@ impl App {
                     self.state.tmux_selected = 0;
                 }
             }
+            Event::ActivePaneRefreshed(active) => {
+                if let Some(ref active) = active {
+                    let is_own = self.state.own_pane.as_deref() == Some(active.as_str());
+                    if !is_own {
+                        let focused_id = self.state.sessions.iter()
+                            .find(|s| s.tmux_pane.as_deref() == Some(active.as_str()))
+                            .map(|s| s.id.clone());
+                        self.state.focused_session_id = focused_id;
+                    }
+                }
+            }
             Event::RemoteSnapshot(snapshot) => {
                 self.on_remote_snapshot(snapshot);
             }
@@ -1343,18 +1362,28 @@ impl App {
 
     fn on_tick(&mut self) {
         self.state.tick = self.state.tick.wrapping_add(1);
-        // Poll the active tmux pane every ~1s to keep the focused session current.
-        // Skip update when lonko's own pane is active — keep last known focus.
+        // Poll the active tmux pane every ~1s to keep the focused session
+        // current. The two-fork query (list-clients + display-message)
+        // runs on `spawn_blocking` and lands as `Event::ActivePaneRefreshed`
+        // so a busy/slow tmux server can't stall the render loop here.
         if self.state.tick.is_multiple_of(10)
-            && let Some(active) = tmux::active_pane()
+            && let Some(ref tx) = self.scan_tx
+            && !self.active_pane_inflight.load(std::sync::atomic::Ordering::SeqCst)
         {
-            let is_own = self.state.own_pane.as_deref() == Some(active.as_str());
-            if !is_own {
-                let focused_id = self.state.sessions.iter()
-                    .find(|s| s.tmux_pane.as_deref() == Some(active.as_str()))
-                    .map(|s| s.id.clone());
-                self.state.focused_session_id = focused_id;
-            }
+            let tx = tx.clone();
+            self.active_pane_inflight.store(true, std::sync::atomic::Ordering::SeqCst);
+            let inflight = self.active_pane_inflight.clone();
+            tokio::task::spawn_blocking(move || {
+                struct Guard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+                impl Drop for Guard {
+                    fn drop(&mut self) {
+                        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                let _g = Guard(inflight);
+                let active = tmux::active_pane();
+                let _ = tx.send(Event::ActivePaneRefreshed(active));
+            });
         }
         // Prune sessions that completed more than 30 seconds ago
         self.state.prune_completed(30);
