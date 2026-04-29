@@ -517,7 +517,13 @@ impl App {
         // empty ids on the second click so two clicks on a "missing"
         // row don't accidentally satisfy `last_id == &click_id` and
         // fire the action against `selected_session()`.
-        let click_id = self.state.sessions.get(global_idx).map(|s| s.id.clone());
+        //
+        // Index into `visible` (the sorted/filtered list used to compute
+        // the layout), not `self.state.sessions` (the raw list). Group
+        // sorting reorders `visible` so the two indices diverge as soon
+        // as more than one repo group is present, and the bug surfaces
+        // as the wrong session being selected/double-clicked.
+        let click_id = visible.get(global_idx).map(|s| s.id.clone());
         if click_id.is_none() {
             self.last_click = None;
             return;
