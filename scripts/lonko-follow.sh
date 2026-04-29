@@ -36,10 +36,25 @@ mkdir -p "$LAYOUT_DIR"
 
 # If lonko wrote this sentinel it's navigating intentionally;
 # don't follow so Claude keeps the focus.
+#
+# TTL: 1 s. Lonko's writer (`refresh_no_follow_sentinel_async`) only
+# refreshes the file across ~200 ms to cover the two hooks that
+# `switch-client` fires (`client-session-changed` then
+# `after-select-window`), so anything older than that is a leftover
+# from an earlier intentional move and must NOT suppress a fresh
+# follow. Without this, a sentinel written when the user clicked an
+# agent kept blocking subsequent unrelated tab switches: lonko stayed
+# in the previous window and `cmd+shift+a` was the only way out.
 if [ -f "$SENTINEL" ]; then
+    NOW=$(date +%s)
+    MTIME=$(stat -f %m "$SENTINEL" 2>/dev/null || echo "$NOW")
+    AGE=$(( NOW - MTIME ))
     rm -f "$SENTINEL"
-    debug_log "sentinel-hit"
-    exit 0
+    if [ "$AGE" -lt 1 ]; then
+        debug_log "sentinel-hit"
+        exit 0
+    fi
+    debug_log "sentinel-stale"
 fi
 
 # Skip follow for floating popups, lonko-tray (internal sessions), and
