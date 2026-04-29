@@ -21,13 +21,31 @@ debug_log() {
 }
 
 # Serialise concurrent invocations (client-session-changed and
-# after-select-window can fire back-to-back). Uses mkdir as an
-# atomic lock; if another invocation holds it, bail out — no
-# stale-lock recovery to avoid TOCTOU races.
+# after-select-window can fire back-to-back). `mkdir` is atomic.
+#
+# Stale-lock recovery: a previous invocation killed before its EXIT
+# trap ran (SIGKILL, OOM, system crash) leaves the directory behind
+# permanently, and every later hook bails out — lonko stops following
+# until the user manually deletes the lock. Normal execution is well
+# under a second, so anything older than LOCK_STALE_SECONDS is a
+# leftover. Reclaim it and retry the mkdir; if a sibling raced us to
+# the recovery, our second mkdir loses and we exit cleanly.
 LOCKDIR="$HOME/.cache/lonko-follow.lock"
+LOCK_STALE_SECONDS=5
 if ! mkdir "$LOCKDIR" 2>/dev/null; then
-    debug_log "lock-held"
-    exit 0
+    LOCK_MTIME=$(stat -f %m "$LOCKDIR" 2>/dev/null || echo 0)
+    NOW=$(date +%s)
+    LOCK_AGE=$(( NOW - LOCK_MTIME ))
+    if [ "$LOCK_AGE" -lt "$LOCK_STALE_SECONDS" ]; then
+        debug_log "lock-held"
+        exit 0
+    fi
+    rm -rf "$LOCKDIR"
+    if ! mkdir "$LOCKDIR" 2>/dev/null; then
+        debug_log "lock-stale-lost"
+        exit 0
+    fi
+    debug_log "lock-stale-recovered"
 fi
 trap 'rm -rf "$LOCKDIR"' EXIT
 
