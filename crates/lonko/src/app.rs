@@ -76,6 +76,15 @@ pub fn hook_event_to_status(
             let path = session.transcript_path.clone()
                 .map(std::path::PathBuf::from)
                 .or_else(|| Some(transcript::transcript_path(&session.cwd, &session.id)));
+            // Set the new status BEFORE applying transcript info so
+            // `apply_transcript_info`'s `!is_active()` guard accepts
+            // the freshly-written `last_prompt` instead of dropping it.
+            // Without this, the guard sees the old (Running/RunningTool)
+            // status and silently discards the transcript's prompt,
+            // leaving the card showing the previous turn's prompt.
+            // The caller writes the same Idle when applying our return
+            // value; the double-write is intentional and harmless.
+            session.status = SessionStatus::Idle;
             if let Some(path) = path {
                 if let Some(mut info) = transcript::read_latest(&path) {
                     info.branch = transcript::git_branch(&session.cwd).or(info.branch);
@@ -268,6 +277,18 @@ pub struct App {
     /// `sync_remote_bridges` so bridges can be kept alive regardless of
     /// which tab the user is on.
     remote_online_hosts: std::collections::HashSet<String>,
+    /// Suppresses auto-hide while a panel-move is in flight.
+    /// `focus_local_agent_pane`, `attach_remote_agent`, and
+    /// `attach_remote_session` all trigger tmux state transitions
+    /// (`break-pane`/`join-pane`/`switch-client`) that fire
+    /// `client-session-changed` and `after-select-window` hooks
+    /// asynchronously. During the transient window between break-pane
+    /// and the destination's join-pane, alone-detection can see lonko
+    /// briefly parked alone in a session-of-one and call `hide_panel`,
+    /// making lonko visibly disappear after a normal agent switch.
+    /// Set this to `now + 500ms` at the start of every move op; the
+    /// alone-detection short-circuits while it is in the future.
+    panel_moving_until: Option<std::time::Instant>,
 }
 
 impl App {
@@ -293,7 +314,16 @@ impl App {
             remote_bridges: std::collections::HashMap::new(),
             remote_bridge_starting: std::collections::HashSet::new(),
             remote_online_hosts: std::collections::HashSet::new(),
+            panel_moving_until: None,
         }
+    }
+
+    /// Mark the panel as currently moving between tmux windows/sessions.
+    /// `should_self_quit_when_alone` returns false until the deadline expires.
+    fn mark_panel_moving(&mut self) {
+        self.panel_moving_until = Some(
+            std::time::Instant::now() + std::time::Duration::from_millis(500)
+        );
     }
 
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
@@ -518,6 +548,7 @@ impl App {
                 // as Enter), then bail out of the local focus-retry loop.
                 if let Some(host) = session.host.as_deref() {
                     if let Some(pane) = session.tmux_pane.as_deref() {
+                        self.mark_panel_moving();
                         attach_remote_agent(host, pane);
                     }
                     self.last_action_at = Some(std::time::Instant::now());
@@ -725,7 +756,8 @@ impl App {
     /// design rationale). Reuses the wrapper local session if already
     /// open, and tells the remote tmux to switch to the picked session
     /// via a separate ssh call.
-    fn attach_remote_session(&self) {
+    fn attach_remote_session(&mut self) {
+        self.mark_panel_moving();
         let Some((host, session_name)) = self.state.selected_remote_session() else { return };
         let short = short_host(host);
         let local_session = format!("remote/{short}");
@@ -766,6 +798,13 @@ impl App {
     /// Skips lonko-internal sessions (lonko-tray, floating-*) where lonko is meant
     /// to keep running in the background.
     fn should_self_quit_when_alone(&self) -> bool {
+        // Suppress while a panel move is in flight: between break-pane
+        // and join-pane, lonko can transiently appear alone in a
+        // session-of-one and the unguarded check would hide the panel
+        // mid-switch.
+        if self.panel_moving_until.is_some_and(|t| t > std::time::Instant::now()) {
+            return false;
+        }
         let Some(own) = self.state.own_pane.as_deref() else { return false };
         let Some(session) = tmux::tmux_session_for_pane(own) else { return false };
         // `remote/*` is now treated the same as the lonko-internal
@@ -879,19 +918,29 @@ impl App {
     }
 
     fn focus_selected(&mut self) {
-        let Some(session) = self.state.selected_session() else { return };
+        // Pull every value out of the borrow up front so we can call
+        // `&mut self` helpers (mark_panel_moving, focus_local_agent_pane)
+        // without fighting the borrow checker.
+        let (host, stored_pane, pid, session_id) = {
+            let Some(session) = self.state.selected_session() else { return };
+            (
+                session.host.clone(),
+                session.tmux_pane.clone(),
+                session.pid,
+                session.id.clone(),
+            )
+        };
+
         // Remote agent: open a new tmux window that SSH-attaches to the
         // remote tmux session containing this pane. Falls back to a no-op
         // when we don't yet know the pane (hook hasn't landed).
-        if let Some(host) = session.host.as_deref() {
-            if let Some(pane) = session.tmux_pane.as_deref() {
-                attach_remote_agent(host, pane);
+        if let Some(host) = host {
+            if let Some(pane) = stored_pane {
+                self.mark_panel_moving();
+                attach_remote_agent(&host, &pane);
             }
             return;
         }
-        let pid = session.pid;
-        let session_id = session.id.clone();
-        let stored_pane = session.tmux_pane.clone();
 
         // Use stored pane or discover it by walking the process tree
         let pane = stored_pane.or_else(|| tmux::find_pane_for_pid(pid));
@@ -925,7 +974,8 @@ impl App {
     /// The no-follow sentinel is written before the pre-move so any hook
     /// that races in finds lonko already parked where it belongs and
     /// exits via the `already-here` branch instead of redoing the move.
-    fn focus_local_agent_pane(&self, pane: &str) {
+    fn focus_local_agent_pane(&mut self, pane: &str) {
+        self.mark_panel_moving();
         let Some(target_win) = tmux::tmux_window_for_pane(pane) else {
             // Can't resolve the target window — fall back to the plain
             // select + switch-client pair so focus still works, albeit
