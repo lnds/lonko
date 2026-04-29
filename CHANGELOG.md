@@ -1,3 +1,64 @@
+## v0.19.8 (2026-04-29)
+
+### Fix
+
+- **app**: index click resolution into the visible list, not the raw one
+- **follow**: recover from stale follow-script lock
+- **remote**: hide remote/<host> wrappers and reap them on disable
+- **app**: refresh last_prompt on Stop and debounce auto-hide during pane moves
+
+### Perf
+
+- **app**: move per-second active_pane poll off the event loop
+
+## v0.19.7 (2026-04-29)
+
+### Fix
+
+- **follow**: time out the no-follow sentinel after 1 s
+
+## v0.19.6 (2026-04-27)
+
+### Fix
+
+- **panel**: linus review punch list — guards, lockout window, and tray hygiene
+
+## v0.19.5 (2026-04-27)
+
+### Fix
+
+- **panel**: debounce queued clicks during slow focus/attach actions
+
+## v0.19.4 (2026-04-27)
+
+### Fix
+
+- **remote**: stop double-paneling and auto-hiding inside remote wrappers
+
+## v0.19.3 (2026-04-27)
+
+### Fix
+
+- **panel**: auto-hide instead of auto-quit, and stable double-click guard
+
+## v0.19.2 (2026-04-27)
+
+### Fix
+
+- **remote**: pin switch-client to the active client on multi-client setups
+
+## v0.19.1 (2026-04-27)
+
+### Perf
+
+- **remote**: cut network churn so remote mode does not feed Wi-Fi storms
+
+## v0.19.0 (2026-04-27)
+
+### Perf
+
+- **state**: refresh Sessions tab off the main thread
+
 ## v0.18.9 (2026-04-26)
 
 ### Fix
