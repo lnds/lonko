@@ -81,6 +81,31 @@ pub fn select_last_pane() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Width of `pane_id` as a percentage of its window's total width, clamped
+/// to [10, 70]. Used by `focus_local_agent_pane` to preserve the user's
+/// manually-resized lonko sidebar across window switches: a hardcoded
+/// 25% would snap the panel back to default on every move. Returns
+/// `None` when tmux can't resolve either dimension.
+pub fn pane_width_pct(pane_id: &str) -> Option<u8> {
+    let pane_width = display_message_u32(&["-t", pane_id, "-p", "#{pane_width}"])?;
+    let win_width = display_message_u32(&["-t", pane_id, "-p", "#{window_width}"])?;
+    if win_width == 0 { return None; }
+    let pct = (pane_width.saturating_mul(100)) / win_width;
+    Some(pct.clamp(10, 70) as u8)
+}
+
+fn display_message_u32(extra_args: &[&str]) -> Option<u32> {
+    let mut args = vec!["display-message"];
+    args.extend(extra_args);
+    let output = Command::new("tmux")
+        .args(&args)
+        .output()
+        .ok()?;
+    if !output.status.success() { return None; }
+    let s = String::from_utf8(output.stdout).ok()?;
+    s.trim().parse::<u32>().ok()
+}
+
 /// Return the pane ID currently active in the main tmux client.
 pub fn active_pane() -> Option<String> {
     let client = find_main_client()?;

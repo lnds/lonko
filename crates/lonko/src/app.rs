@@ -1015,7 +1015,11 @@ impl App {
             && !tmux::window_has_lonko_pane(&target_win)
         {
             write_no_follow_sentinel();
-            let _ = tmux::join_pane_right(own, &target_win, 25);
+            // Preserve the user's manually-resized sidebar width across
+            // the move. Falling back to 25% only when tmux can't tell
+            // us the current dimensions (cold path).
+            let pct = tmux::pane_width_pct(own).unwrap_or(25);
+            let _ = tmux::join_pane_right(own, &target_win, pct);
         }
 
         let _ = tmux::select_pane(pane);
