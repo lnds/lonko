@@ -1,3 +1,9 @@
+## v0.21.1 (2026-04-29)
+
+### Fix
+
+- **panel**: persist preferred sidebar width as a percentage
+
 ## v0.21.0 (2026-04-29)
 
 ### Feat
