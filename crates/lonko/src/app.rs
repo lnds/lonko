@@ -381,6 +381,17 @@ impl App {
             .unwrap_or(true);
         if !stable { return; }
         let Some(own) = self.state.own_pane.as_deref() else { return };
+        // Skip when lonko is parked in `lonko-tray` (hidden) or in a
+        // floating popup session — both cases have lonko as the sole
+        // pane, so its width is ~100% of the host window and the
+        // capture would store 70% (clamp ceiling) as the user's
+        // preference. The next focus move would then join lonko at
+        // 70% of the destination, producing a gigantic sidebar.
+        let session = tmux::tmux_session_for_pane(own);
+        let is_internal = session.as_deref().is_some_and(|s| {
+            s == "lonko-tray" || s.starts_with("floating-") || s.starts_with("remote/")
+        });
+        if is_internal { return; }
         let Some(pct) = tmux::pane_width_pct(own) else { return };
         // Require a meaningful change before overwriting the preference.
         // Even with half-up rounding, post-rescale tmux can briefly
