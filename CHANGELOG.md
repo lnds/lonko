@@ -1,3 +1,9 @@
+## v0.21.2 (2026-04-29)
+
+### Fix
+
+- **panel**: stop preferred-width drift from percentage truncation
+
 ## v0.21.1 (2026-04-29)
 
 ### Fix
