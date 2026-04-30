@@ -1029,16 +1029,31 @@ impl App {
         let Some(session) = tmux::tmux_session_for_pane(own) else { return };
         if session != "lonko-tray" { return; }
         let Some(client) = tmux::find_main_client() else { return };
-        let cur_win = std::process::Command::new("tmux")
-            .args(["display-message", "-c", &client, "-p", "#{window_id}"])
+        // Pull both the window AND the session of the user's current
+        // view in a single display-message so we can guard against
+        // wrapper / popup destinations the same way `lonko-follow.sh`
+        // does. The split-on-NUL is intentional: session names can
+        // contain `/` (e.g. `remote/<host>`).
+        let cur = std::process::Command::new("tmux")
+            .args(["display-message", "-c", &client, "-p", "#{window_id}\x1f#{session_name}"])
             .output()
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        let Some(cur_win) = cur_win else { return };
-        if tmux::window_has_lonko_pane(&cur_win) { return; }
-        let _ = tmux::join_pane_right(own, &cur_win, "25%");
+        let Some(cur) = cur else { return };
+        let mut parts = cur.splitn(2, '\x1f');
+        let Some(cur_win) = parts.next().filter(|s| !s.is_empty()) else { return };
+        let cur_session = parts.next().unwrap_or("");
+        // Skip when the user is inside an SSH-attach to a remote tmux
+        // (`remote/<host>`) that already carries its own lonko, and
+        // skip floating popups where lonko has no business stacking
+        // a sidebar on top of a transient view.
+        if cur_session.starts_with("remote/") || cur_session.starts_with("floating-") {
+            return;
+        }
+        if tmux::window_has_lonko_pane(cur_win) { return; }
+        let _ = tmux::join_pane_right(own, cur_win, "25%");
     }
 
     fn refresh_selected_transcript(&self) {
