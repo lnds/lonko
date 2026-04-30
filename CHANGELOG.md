@@ -1,3 +1,14 @@
+## v0.20.0 (2026-04-29)
+
+### Feat
+
+- **ui**: pin a NEEDS YOU section at the bottom of the sidebar
+
+### Fix
+
+- **panel**: refresh no-follow sentinel across both hook firings
+- **panel**: preserve sidebar width with absolute columns, not percent
+
 ## v0.19.9 (2026-04-29)
 
 ### Fix
