@@ -88,11 +88,18 @@ pub fn select_last_pane() -> anyhow::Result<()> {
 /// every time the user navigates to a window attached by a wider
 /// client, because the post-`switch-client` rescale halves the
 /// actual columns.
+///
+/// Round-half-up the result, NOT integer truncation. Truncation drifts
+/// the percentage downward each switch: 31/127 = 24.4% → 24% join → 30
+/// cols → 23.6% → 23% join → 28 cols → 22% → ... Half-up rounding
+/// keeps 30/127 → 24% (same as 31/127), so the preference stays stable
+/// across the rescale-and-poll cycle.
 pub fn pane_width_pct(pane_id: &str) -> Option<u32> {
     let pane_w: u32 = display_message_int(&["-t", pane_id, "-p", "#{pane_width}"])?;
     let win_w: u32 = display_message_int(&["-t", pane_id, "-p", "#{window_width}"])?;
     if win_w == 0 { return None; }
-    Some((pane_w.saturating_mul(100) / win_w).clamp(10, 70))
+    let scaled = pane_w.saturating_mul(100).saturating_add(win_w / 2);
+    Some((scaled / win_w).clamp(10, 70))
 }
 
 fn display_message_int(args: &[&str]) -> Option<u32> {

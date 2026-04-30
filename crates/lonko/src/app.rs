@@ -382,7 +382,16 @@ impl App {
         if !stable { return; }
         let Some(own) = self.state.own_pane.as_deref() else { return };
         let Some(pct) = tmux::pane_width_pct(own) else { return };
-        if self.preferred_width_pct == Some(pct) { return; }
+        // Require a meaningful change before overwriting the preference.
+        // Even with half-up rounding, post-rescale tmux can briefly
+        // report 1pp off; treating that as a manual resize would drift
+        // the preference downward over time. Genuine manual resizes
+        // are usually 5+pp; 2pp is a safe threshold.
+        if let Some(prev) = self.preferred_width_pct
+            && prev.abs_diff(pct) < 2
+        {
+            return;
+        }
         self.preferred_width_pct = Some(pct);
         let _ = save_preferred_width(pct);
     }
