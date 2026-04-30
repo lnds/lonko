@@ -1,3 +1,9 @@
+## v0.20.1 (2026-04-29)
+
+### Fix
+
+- **panel**: pin sidebar width back to a fixed 25%
+
 ## v0.20.0 (2026-04-29)
 
 ### Feat
