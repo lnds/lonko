@@ -477,7 +477,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             None
         } else {
             let mut ch = card_height(s, &state.bookmarks);
-            if global_idx == state.selected && state.bookmark_mode
+            if global_idx == state.selected && state.bookmark.mode
                 && !state.bookmarks.contains_key(&s.cwd)
             {
                 ch += 1;
@@ -556,13 +556,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         let position = main_position(global_idx);
         let icon = all_main_icons.get(global_idx).copied().unwrap_or("🤖");
         let bookmark_note = state.bookmarks.get(&session.cwd).map(|s| s.as_str());
-        let worktree_input = if selected && state.worktree_mode {
-            Some(state.worktree_input.as_str())
+        let worktree_input = if selected && state.worktree.mode {
+            Some(state.worktree.input.as_str())
         } else {
             None
         };
-        let bookmark_input = if selected && state.bookmark_mode {
-            Some(state.bookmark_input.as_str())
+        let bookmark_input = if selected && state.bookmark.mode {
+            Some(state.bookmark.input.as_str())
         } else {
             None
         };

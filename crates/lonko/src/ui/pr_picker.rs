@@ -59,24 +59,24 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 fn render_search(frame: &mut Frame, area: Rect, state: &AppState) {
     let line = Line::from(vec![
         Span::styled(" / ", Style::default().fg(BLUE)),
-        Span::styled(state.pr_picker_query.clone(), Style::default().fg(TEXT)),
+        Span::styled(state.pr_picker.query.clone(), Style::default().fg(TEXT)),
         Span::styled("▏", Style::default().fg(BLUE)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }
 
 fn render_status(frame: &mut Frame, area: Rect, state: &AppState) {
-    let line = if state.pr_picker_loading {
+    let line = if state.pr_picker.loading {
         Line::from(Span::styled(" loading…", Style::default().fg(DIM)))
-    } else if let Some(err) = &state.pr_picker_error {
+    } else if let Some(err) = &state.pr_picker.error {
         Line::from(vec![
             Span::styled(" error: ", Style::default().fg(RED).add_modifier(Modifier::BOLD)),
             Span::styled(err.clone(), Style::default().fg(RED)),
         ])
     } else {
-        let total = state.pr_picker_prs.len();
+        let total = state.pr_picker.prs.len();
         let shown = state.filtered_pr_picker().len();
-        let text = if state.pr_picker_query.is_empty() {
+        let text = if state.pr_picker.query.is_empty() {
             format!(" {total} open")
         } else {
             format!(" {shown} / {total} match")
@@ -87,12 +87,12 @@ fn render_status(frame: &mut Frame, area: Rect, state: &AppState) {
 }
 
 fn render_list(frame: &mut Frame, area: Rect, state: &AppState) {
-    if state.pr_picker_loading {
+    if state.pr_picker.loading {
         return;
     }
     let filtered = state.filtered_pr_picker();
     if filtered.is_empty() {
-        let msg = if state.pr_picker_prs.is_empty() && !state.pr_picker_loading {
+        let msg = if state.pr_picker.prs.is_empty() && !state.pr_picker.loading {
             " no open PRs"
         } else {
             " no PRs match the filter"
@@ -111,7 +111,7 @@ fn render_list(frame: &mut Frame, area: Rect, state: &AppState) {
     }
     let half = list_h / 2;
     let total = filtered.len();
-    let selected = state.pr_picker_selected.min(total.saturating_sub(1));
+    let selected = state.pr_picker.selected.min(total.saturating_sub(1));
     let scroll = if selected < half {
         0
     } else if selected + (list_h - half) >= total {

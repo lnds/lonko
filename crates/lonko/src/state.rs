@@ -287,6 +287,66 @@ pub fn save_bookmarks(bookmarks: &HashMap<String, String>) {
     }
 }
 
+/// Modal-feature state groups. Each one bundles the boolean "this mode
+/// is active" flag with the input buffers and cached values that only
+/// matter while that mode is engaged. Splitting these out of `AppState`
+/// keeps the parent struct readable and makes `Default::default()` /
+/// `clear_*` patterns trivial — drop the whole substruct, get a clean
+/// slate, no per-field reset.
+
+#[derive(Debug, Default)]
+pub struct WorktreeModeState {
+    /// User is typing a branch name for a new worktree.
+    pub mode: bool,
+    /// Branch name buffer.
+    pub input: String,
+    /// The cwd to create the worktree from (set when entering the mode).
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct BookmarkModeState {
+    /// User is typing a bookmark note.
+    pub mode: bool,
+    /// Note text being edited.
+    pub input: String,
+}
+
+#[derive(Debug, Default)]
+pub struct NewAgentState {
+    /// User is typing the initial prompt for a new agent.
+    pub mode: bool,
+    /// Prompt text buffer.
+    pub input: String,
+    /// Editable cwd buffer (the user can override the auto-resolved cwd).
+    pub cwd_input: String,
+    /// The auto-resolved cwd captured when entering the mode. Used to
+    /// expand `.` at submit time even if the user edited `cwd_input`.
+    pub resolved_cwd: String,
+    /// Which field has focus in the popup.
+    pub focus: NewAgentField,
+}
+
+#[derive(Debug, Default)]
+pub struct PrPickerState {
+    /// PR picker modal is open (triggered by `p` in the Agents tab).
+    pub mode: bool,
+    /// Filter query applied to the PR list (substring, case-insensitive,
+    /// matched against number, title, author and branch).
+    pub query: String,
+    /// Whether the background `gh pr list` call is still in flight.
+    pub loading: bool,
+    /// Error message from the last `gh pr list` call, if any.
+    pub error: Option<String>,
+    /// The cwd used for the current picker fetch (so the worktree
+    /// creation routes to the same repo).
+    pub cwd: Option<String>,
+    /// Open PRs returned by `gh`, in the order they came back.
+    pub prs: Vec<PrPickItem>,
+    /// Selected index in the **filtered** picker list.
+    pub selected: usize,
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub sessions: Vec<Session>,
@@ -313,31 +373,16 @@ pub struct AppState {
     pub tmux_window_cursor: Option<usize>,
     /// Whether the selected session card is expanded (showing the window list).
     pub tmux_expanded: bool,
-    /// Worktree creation mode: user is typing a branch name.
-    pub worktree_mode: bool,
-    /// Branch name input for worktree creation.
-    pub worktree_input: String,
-    /// The cwd to create the worktree from (set when entering worktree mode).
-    pub worktree_cwd: Option<String>,
+    /// Worktree creation modal state.
+    pub worktree: WorktreeModeState,
     /// Bookmarks: cwd → note. Persisted to disk.
     pub bookmarks: HashMap<String, String>,
-    /// Bookmark note input mode.
-    pub bookmark_mode: bool,
-    /// Bookmark note text being edited.
-    pub bookmark_input: String,
+    /// Bookmark editing modal state.
+    pub bookmark: BookmarkModeState,
     /// Whether the help popup is visible.
     pub show_help: bool,
-    /// New-agent creation mode: user is typing an initial prompt.
-    pub new_agent_mode: bool,
-    /// Prompt text being typed for the new agent.
-    pub new_agent_input: String,
-    /// Editable cwd buffer for the new agent popup.
-    pub new_agent_cwd_input: String,
-    /// The auto-resolved cwd stored when entering new-agent mode.
-    /// Used to expand `.` at submit time.
-    pub new_agent_resolved_cwd: String,
-    /// Which field has focus in the new-agent popup.
-    pub new_agent_focus: NewAgentField,
+    /// New-agent creation modal state.
+    pub new_agent: NewAgentState,
     /// Repo-root keys of groups that are collapsed in the Agents tab.
     /// When collapsed, only a summary header is shown instead of all cards.
     pub collapsed_groups: HashSet<String>,
@@ -354,24 +399,10 @@ pub struct AppState {
     pub remote_enabled: bool,
     /// Remote poll interval in ticks (poll_interval_secs * 10).
     pub remote_poll_ticks: u64,
-    /// PR picker (triggered by `p` in the Agents tab): a modal that lists
-    /// open PRs for the repo of the selected agent so the user can pick
-    /// one to review in a fresh worktree.
-    pub pr_picker_mode: bool,
-    /// Filter query applied to the PR picker list (substring, case-insensitive,
-    /// matched against number, title, author and branch).
-    pub pr_picker_query: String,
-    /// Whether the background `gh pr list` call is still in flight.
-    pub pr_picker_loading: bool,
-    /// Error message from the last `gh pr list` call, if any.
-    pub pr_picker_error: Option<String>,
-    /// The cwd used for the current picker fetch (so we route the worktree
-    /// creation to the same repo).
-    pub pr_picker_cwd: Option<String>,
-    /// Open PRs returned by `gh`, in the order they came back.
-    pub pr_picker_prs: Vec<PrPickItem>,
-    /// Selected index in the **filtered** picker list.
-    pub pr_picker_selected: usize,
+    /// PR picker modal (triggered by `p` in the Agents tab): lists open
+    /// PRs for the repo of the selected agent so the user can pick one
+    /// to review in a fresh worktree.
+    pub pr_picker: PrPickerState,
 }
 
 /// One row in the PR picker list. Mirrors the subset of `gh pr list --json`
@@ -515,18 +546,11 @@ impl Default for AppState {
             tmux_selected: 0,
             tmux_window_cursor: None,
             tmux_expanded: false,
-            worktree_mode: false,
-            worktree_input: String::new(),
-            worktree_cwd: None,
+            worktree: WorktreeModeState::default(),
             bookmarks: HashMap::new(),
-            bookmark_mode: false,
-            bookmark_input: String::new(),
+            bookmark: BookmarkModeState::default(),
             show_help: false,
-            new_agent_mode: false,
-            new_agent_input: String::new(),
-            new_agent_cwd_input: String::new(),
-            new_agent_resolved_cwd: String::new(),
-            new_agent_focus: NewAgentField::default(),
+            new_agent: NewAgentState::default(),
             collapsed_groups: HashSet::new(),
             expanded_subagents: HashSet::new(),
             remote_hosts: vec![],
@@ -534,13 +558,7 @@ impl Default for AppState {
             excluded_hosts: HashSet::new(),
             remote_enabled: false,
             remote_poll_ticks: 300, // 30s default; matches RemoteConfig::default
-            pr_picker_mode: false,
-            pr_picker_query: String::new(),
-            pr_picker_loading: false,
-            pr_picker_error: None,
-            pr_picker_cwd: None,
-            pr_picker_prs: vec![],
-            pr_picker_selected: 0,
+            pr_picker: PrPickerState::default(),
         }
     }
 }
@@ -986,26 +1004,26 @@ impl AppState {
         use crossterm::event::KeyCode;
         match code {
             KeyCode::Esc => {
-                self.worktree_mode = false;
-                self.worktree_input.clear();
-                self.worktree_cwd = None;
+                self.worktree.mode = false;
+                self.worktree.input.clear();
+                self.worktree.cwd = None;
             }
             KeyCode::Enter => {
-                let branch = self.worktree_input.trim().to_string();
-                self.worktree_mode = false;
-                self.worktree_input.clear();
+                let branch = self.worktree.input.trim().to_string();
+                self.worktree.mode = false;
+                self.worktree.input.clear();
                 if !branch.is_empty() {
                     return Some(branch);
                 }
-                self.worktree_cwd = None;
+                self.worktree.cwd = None;
             }
-            KeyCode::Backspace => { self.worktree_input.pop(); }
+            KeyCode::Backspace => { self.worktree.input.pop(); }
             KeyCode::Char('c') if ctrl => {
-                self.worktree_mode = false;
-                self.worktree_input.clear();
-                self.worktree_cwd = None;
+                self.worktree.mode = false;
+                self.worktree.input.clear();
+                self.worktree.cwd = None;
             }
-            KeyCode::Char(c) => { self.worktree_input.push(c); }
+            KeyCode::Char(c) => { self.worktree.input.push(c); }
             _ => {}
         }
         None
@@ -1017,21 +1035,21 @@ impl AppState {
         use crossterm::event::KeyCode;
         match code {
             KeyCode::Esc => {
-                self.bookmark_mode = false;
-                self.bookmark_input.clear();
+                self.bookmark.mode = false;
+                self.bookmark.input.clear();
             }
             KeyCode::Enter => {
-                let note = self.bookmark_input.trim().to_string();
-                self.bookmark_mode = false;
-                self.bookmark_input.clear();
+                let note = self.bookmark.input.trim().to_string();
+                self.bookmark.mode = false;
+                self.bookmark.input.clear();
                 return Some(note);
             }
-            KeyCode::Backspace => { self.bookmark_input.pop(); }
+            KeyCode::Backspace => { self.bookmark.input.pop(); }
             KeyCode::Char('c') if ctrl => {
-                self.bookmark_mode = false;
-                self.bookmark_input.clear();
+                self.bookmark.mode = false;
+                self.bookmark.input.clear();
             }
-            KeyCode::Char(c) => { self.bookmark_input.push(c); }
+            KeyCode::Char(c) => { self.bookmark.input.push(c); }
             _ => {}
         }
         None
@@ -1049,30 +1067,30 @@ impl AppState {
             KeyCode::Char('c') if ctrl => {
                 self.clear_new_agent();
             }
-            KeyCode::Tab => match self.new_agent_focus {
+            KeyCode::Tab => match self.new_agent.focus {
                 NewAgentField::Cwd => {
-                    self.new_agent_cwd_input =
-                        crate::new_agent::complete_path(&self.new_agent_cwd_input);
+                    self.new_agent.cwd_input =
+                        crate::new_agent::complete_path(&self.new_agent.cwd_input);
                 }
                 NewAgentField::Prompt => {
-                    self.new_agent_focus = NewAgentField::Cwd;
+                    self.new_agent.focus = NewAgentField::Cwd;
                 }
             }
-            KeyCode::Enter => match self.new_agent_focus {
+            KeyCode::Enter => match self.new_agent.focus {
                 NewAgentField::Cwd => {
-                    self.new_agent_focus = NewAgentField::Prompt;
+                    self.new_agent.focus = NewAgentField::Prompt;
                 }
                 NewAgentField::Prompt => {
-                    let prompt = self.new_agent_input.trim().to_string();
-                    let raw_cwd = self.new_agent_cwd_input.trim().to_string();
+                    let prompt = self.new_agent.input.trim().to_string();
+                    let raw_cwd = self.new_agent.cwd_input.trim().to_string();
                     // Resolve `.` to the auto-detected cwd.
                     let cwd = if raw_cwd == "." {
-                        self.new_agent_resolved_cwd.clone()
+                        self.new_agent.resolved_cwd.clone()
                     } else {
                         raw_cwd.clone()
                     };
                     if cwd.is_empty() {
-                        self.new_agent_focus = NewAgentField::Cwd;
+                        self.new_agent.focus = NewAgentField::Cwd;
                     } else if prompt.is_empty() {
                         // Nothing to submit — stay in prompt field.
                     } else {
@@ -1081,13 +1099,13 @@ impl AppState {
                     }
                 }
             }
-            KeyCode::Backspace => match self.new_agent_focus {
-                NewAgentField::Cwd => { self.new_agent_cwd_input.pop(); }
-                NewAgentField::Prompt => { self.new_agent_input.pop(); }
+            KeyCode::Backspace => match self.new_agent.focus {
+                NewAgentField::Cwd => { self.new_agent.cwd_input.pop(); }
+                NewAgentField::Prompt => { self.new_agent.input.pop(); }
             }
-            KeyCode::Char(c) if c != '\n' && c != '\r' => match self.new_agent_focus {
-                NewAgentField::Cwd => { self.new_agent_cwd_input.push(c); }
-                NewAgentField::Prompt => { self.new_agent_input.push(c); }
+            KeyCode::Char(c) if c != '\n' && c != '\r' => match self.new_agent.focus {
+                NewAgentField::Cwd => { self.new_agent.cwd_input.push(c); }
+                NewAgentField::Prompt => { self.new_agent.input.push(c); }
             }
             _ => {}
         }
@@ -1115,7 +1133,7 @@ impl AppState {
             KeyCode::Enter => {
                 if let Some(pr) = self.selected_pr_picker_item() {
                     let submit = PrPickerSubmit {
-                        cwd: self.pr_picker_cwd.clone().unwrap_or_default(),
+                        cwd: self.pr_picker.cwd.clone().unwrap_or_default(),
                         number: pr.number,
                         title: pr.title.clone(),
                     };
@@ -1128,12 +1146,12 @@ impl AppState {
             KeyCode::Char('p') if ctrl => { self.navigate_pr_picker(-1); }
             KeyCode::Char('n') if ctrl => { self.navigate_pr_picker(1); }
             KeyCode::Backspace => {
-                self.pr_picker_query.pop();
-                self.pr_picker_selected = 0;
+                self.pr_picker.query.pop();
+                self.pr_picker.selected = 0;
             }
             KeyCode::Char(c) => {
-                self.pr_picker_query.push(c);
-                self.pr_picker_selected = 0;
+                self.pr_picker.query.push(c);
+                self.pr_picker.selected = 0;
             }
             _ => {}
         }
@@ -1142,23 +1160,23 @@ impl AppState {
 
     /// Reset picker state back to closed.
     pub fn clear_pr_picker(&mut self) {
-        self.pr_picker_mode = false;
-        self.pr_picker_query.clear();
-        self.pr_picker_loading = false;
-        self.pr_picker_error = None;
-        self.pr_picker_cwd = None;
-        self.pr_picker_prs.clear();
-        self.pr_picker_selected = 0;
+        self.pr_picker.mode = false;
+        self.pr_picker.query.clear();
+        self.pr_picker.loading = false;
+        self.pr_picker.error = None;
+        self.pr_picker.cwd = None;
+        self.pr_picker.prs.clear();
+        self.pr_picker.selected = 0;
     }
 
     /// Substring-match the query against each PR's number, title, branch
     /// and author. Empty query returns all PRs in insertion order.
     pub fn filtered_pr_picker(&self) -> Vec<&PrPickItem> {
-        if self.pr_picker_query.is_empty() {
-            return self.pr_picker_prs.iter().collect();
+        if self.pr_picker.query.is_empty() {
+            return self.pr_picker.prs.iter().collect();
         }
-        let q = self.pr_picker_query.to_lowercase();
-        self.pr_picker_prs
+        let q = self.pr_picker.query.to_lowercase();
+        self.pr_picker.prs
             .iter()
             .filter(|p| {
                 p.number.to_string().contains(&q)
@@ -1175,21 +1193,21 @@ impl AppState {
     pub fn navigate_pr_picker(&mut self, delta: isize) {
         let len = self.filtered_pr_picker().len();
         if len == 0 {
-            self.pr_picker_selected = 0;
+            self.pr_picker.selected = 0;
             return;
         }
         let max = len - 1;
         if delta > 0 {
-            self.pr_picker_selected = (self.pr_picker_selected + 1).min(max);
+            self.pr_picker.selected = (self.pr_picker.selected + 1).min(max);
         } else {
-            self.pr_picker_selected = self.pr_picker_selected.saturating_sub(1);
+            self.pr_picker.selected = self.pr_picker.selected.saturating_sub(1);
         }
     }
 
     /// Returns the currently selected PR in the filtered list, or `None`
     /// when the list is empty.
     pub fn selected_pr_picker_item(&self) -> Option<&PrPickItem> {
-        self.filtered_pr_picker().into_iter().nth(self.pr_picker_selected)
+        self.filtered_pr_picker().into_iter().nth(self.pr_picker.selected)
     }
 
     /// Open the new-agent popup. If `cwd` is non-empty, the Dir field
@@ -1197,27 +1215,27 @@ impl AppState {
     /// is stored for expansion at submit time. An empty `cwd` leaves
     /// the Dir field empty so the user must type a path.
     pub fn open_new_agent(&mut self, cwd: String) {
-        self.new_agent_resolved_cwd = cwd.clone();
-        self.new_agent_cwd_input = if cwd.is_empty() {
+        self.new_agent.resolved_cwd = cwd.clone();
+        self.new_agent.cwd_input = if cwd.is_empty() {
             String::new()
         } else {
             ".".to_string()
         };
-        self.new_agent_input.clear();
-        self.new_agent_focus = if cwd.is_empty() {
+        self.new_agent.input.clear();
+        self.new_agent.focus = if cwd.is_empty() {
             NewAgentField::Cwd
         } else {
             NewAgentField::Prompt
         };
-        self.new_agent_mode = true;
+        self.new_agent.mode = true;
     }
 
     fn clear_new_agent(&mut self) {
-        self.new_agent_mode = false;
-        self.new_agent_input.clear();
-        self.new_agent_cwd_input.clear();
-        self.new_agent_resolved_cwd.clear();
-        self.new_agent_focus = NewAgentField::default();
+        self.new_agent.mode = false;
+        self.new_agent.input.clear();
+        self.new_agent.cwd_input.clear();
+        self.new_agent.resolved_cwd.clear();
+        self.new_agent.focus = NewAgentField::default();
     }
 
     /// Return tmux sessions filtered by the current search query.
@@ -1951,12 +1969,12 @@ mod tests {
     #[test]
     fn pr_picker_filter_matches_title_substring_case_insensitive() {
         let mut state = AppState::default();
-        state.pr_picker_prs = vec![
+        state.pr_picker.prs = vec![
             mk_pr(1, "Add caching layer", "feat/cache", "alice"),
             mk_pr(2, "Fix flaky test", "fix/flaky", "bob"),
             mk_pr(3, "Refactor router", "refactor/router", "alice"),
         ];
-        state.pr_picker_query = "CACHE".into();
+        state.pr_picker.query = "CACHE".into();
         let nums: Vec<u32> = state.filtered_pr_picker().iter().map(|p| p.number).collect();
         assert_eq!(nums, vec![1]);
     }
@@ -1964,12 +1982,12 @@ mod tests {
     #[test]
     fn pr_picker_filter_matches_number_prefix() {
         let mut state = AppState::default();
-        state.pr_picker_prs = vec![
+        state.pr_picker.prs = vec![
             mk_pr(42, "One", "a", "x"),
             mk_pr(123, "Two", "b", "y"),
             mk_pr(1234, "Three", "c", "z"),
         ];
-        state.pr_picker_query = "123".into();
+        state.pr_picker.query = "123".into();
         let nums: Vec<u32> = state.filtered_pr_picker().iter().map(|p| p.number).collect();
         assert_eq!(nums, vec![123, 1234]);
     }
@@ -1977,15 +1995,15 @@ mod tests {
     #[test]
     fn pr_picker_filter_matches_author_or_branch() {
         let mut state = AppState::default();
-        state.pr_picker_prs = vec![
+        state.pr_picker.prs = vec![
             mk_pr(1, "A", "feat/x", "alice"),
             mk_pr(2, "B", "bugfix/y", "bob"),
         ];
-        state.pr_picker_query = "bob".into();
+        state.pr_picker.query = "bob".into();
         let nums: Vec<u32> = state.filtered_pr_picker().iter().map(|p| p.number).collect();
         assert_eq!(nums, vec![2]);
 
-        state.pr_picker_query = "bugfix".into();
+        state.pr_picker.query = "bugfix".into();
         let nums: Vec<u32> = state.filtered_pr_picker().iter().map(|p| p.number).collect();
         assert_eq!(nums, vec![2]);
     }
@@ -1993,51 +2011,51 @@ mod tests {
     #[test]
     fn pr_picker_navigate_clamps_to_filtered_bounds() {
         let mut state = AppState::default();
-        state.pr_picker_prs = vec![
+        state.pr_picker.prs = vec![
             mk_pr(1, "A", "a", "x"),
             mk_pr(2, "B", "b", "y"),
             mk_pr(3, "C", "c", "z"),
         ];
-        state.pr_picker_selected = 0;
+        state.pr_picker.selected = 0;
         state.navigate_pr_picker(1);
-        assert_eq!(state.pr_picker_selected, 1);
+        assert_eq!(state.pr_picker.selected, 1);
         state.navigate_pr_picker(1);
-        assert_eq!(state.pr_picker_selected, 2);
+        assert_eq!(state.pr_picker.selected, 2);
         state.navigate_pr_picker(1);
-        assert_eq!(state.pr_picker_selected, 2); // clamped
+        assert_eq!(state.pr_picker.selected, 2); // clamped
         state.navigate_pr_picker(-1);
         state.navigate_pr_picker(-1);
         state.navigate_pr_picker(-1);
-        assert_eq!(state.pr_picker_selected, 0); // clamped
+        assert_eq!(state.pr_picker.selected, 0); // clamped
     }
 
     #[test]
     fn pr_picker_enter_returns_submit_and_clears_state() {
         use crossterm::event::KeyCode;
         let mut state = AppState::default();
-        state.pr_picker_mode = true;
-        state.pr_picker_cwd = Some("/tmp/repo".into());
-        state.pr_picker_prs = vec![mk_pr(7, "Ship it", "feat/x", "alice")];
-        state.pr_picker_selected = 0;
+        state.pr_picker.mode = true;
+        state.pr_picker.cwd = Some("/tmp/repo".into());
+        state.pr_picker.prs = vec![mk_pr(7, "Ship it", "feat/x", "alice")];
+        state.pr_picker.selected = 0;
 
         let submit = state.apply_pr_picker_key(KeyCode::Enter, false);
         let submit = submit.expect("Enter on a valid row should return a submission");
         assert_eq!(submit.number, 7);
         assert_eq!(submit.title, "Ship it");
         assert_eq!(submit.cwd, "/tmp/repo");
-        assert!(!state.pr_picker_mode);
-        assert!(state.pr_picker_prs.is_empty());
+        assert!(!state.pr_picker.mode);
+        assert!(state.pr_picker.prs.is_empty());
     }
 
     #[test]
     fn pr_picker_esc_closes_without_submission() {
         use crossterm::event::KeyCode;
         let mut state = AppState::default();
-        state.pr_picker_mode = true;
-        state.pr_picker_prs = vec![mk_pr(1, "A", "a", "x")];
+        state.pr_picker.mode = true;
+        state.pr_picker.prs = vec![mk_pr(1, "A", "a", "x")];
         assert!(state.apply_pr_picker_key(KeyCode::Esc, false).is_none());
-        assert!(!state.pr_picker_mode);
-        assert!(state.pr_picker_prs.is_empty());
+        assert!(!state.pr_picker.mode);
+        assert!(state.pr_picker.prs.is_empty());
     }
 
     #[test]
@@ -2279,17 +2297,17 @@ mod tests {
     fn new_agent_open_with_cwd_starts_on_prompt() {
         let mut state = AppState::default();
         state.open_new_agent("/tmp".into());
-        assert_eq!(state.new_agent_focus, NewAgentField::Prompt);
-        assert_eq!(state.new_agent_cwd_input, ".");
-        assert_eq!(state.new_agent_resolved_cwd, "/tmp");
+        assert_eq!(state.new_agent.focus, NewAgentField::Prompt);
+        assert_eq!(state.new_agent.cwd_input, ".");
+        assert_eq!(state.new_agent.resolved_cwd, "/tmp");
     }
 
     #[test]
     fn new_agent_open_without_cwd_starts_on_cwd() {
         let mut state = AppState::default();
         state.open_new_agent(String::new());
-        assert_eq!(state.new_agent_focus, NewAgentField::Cwd);
-        assert!(state.new_agent_cwd_input.is_empty());
+        assert_eq!(state.new_agent.focus, NewAgentField::Cwd);
+        assert!(state.new_agent.cwd_input.is_empty());
     }
 
     #[test]
@@ -2299,7 +2317,7 @@ mod tests {
         state.open_new_agent("/tmp".into());
         // focus starts on Prompt (non-empty cwd)
         state.apply_new_agent_key(KeyCode::Tab, false);
-        assert_eq!(state.new_agent_focus, NewAgentField::Cwd);
+        assert_eq!(state.new_agent.focus, NewAgentField::Cwd);
     }
 
     #[test]
@@ -2312,13 +2330,13 @@ mod tests {
 
         let mut state = AppState::default();
         // Directly set the cwd_input to a partial path for completion testing.
-        state.new_agent_mode = true;
-        state.new_agent_focus = NewAgentField::Cwd;
-        state.new_agent_cwd_input = partial;
+        state.new_agent.mode = true;
+        state.new_agent.focus = NewAgentField::Cwd;
+        state.new_agent.cwd_input = partial;
         state.apply_new_agent_key(KeyCode::Tab, false);
-        assert!(state.new_agent_cwd_input.contains("unique-child"),
-            "expected completion, got: {}", state.new_agent_cwd_input);
-        assert_eq!(state.new_agent_focus, NewAgentField::Cwd);
+        assert!(state.new_agent.cwd_input.contains("unique-child"),
+            "expected completion, got: {}", state.new_agent.cwd_input);
+        assert_eq!(state.new_agent.focus, NewAgentField::Cwd);
     }
 
     #[test]
@@ -2328,11 +2346,11 @@ mod tests {
         state.open_new_agent("/tmp".into());
         // open_new_agent with a non-empty cwd starts focus on Prompt;
         // switch to Cwd to test the Enter-on-Cwd path.
-        state.new_agent_focus = NewAgentField::Cwd;
+        state.new_agent.focus = NewAgentField::Cwd;
         let result = state.apply_new_agent_key(KeyCode::Enter, false);
         assert!(result.is_none());
-        assert!(state.new_agent_mode); // still open
-        assert_eq!(state.new_agent_focus, NewAgentField::Prompt);
+        assert!(state.new_agent.mode); // still open
+        assert_eq!(state.new_agent.focus, NewAgentField::Prompt);
     }
 
     #[test]
@@ -2341,11 +2359,11 @@ mod tests {
         let mut state = AppState::default();
         state.open_new_agent("/tmp/proj".into());
         // open_new_agent sets cwd_input="." and focus=Prompt
-        state.new_agent_input = "build a thing".into();
+        state.new_agent.input = "build a thing".into();
         let result = state.apply_new_agent_key(KeyCode::Enter, false);
         // "." resolves to the stored resolved_cwd
         assert_eq!(result, Some(("build a thing".into(), "/tmp/proj".into())));
-        assert!(!state.new_agent_mode);
+        assert!(!state.new_agent.mode);
     }
 
     #[test]
@@ -2353,12 +2371,12 @@ mod tests {
         use crossterm::event::KeyCode;
         let mut state = AppState::default();
         state.open_new_agent(String::new());
-        state.new_agent_focus = NewAgentField::Prompt;
-        state.new_agent_input = "build a thing".into();
+        state.new_agent.focus = NewAgentField::Prompt;
+        state.new_agent.input = "build a thing".into();
         let result = state.apply_new_agent_key(KeyCode::Enter, false);
         assert!(result.is_none());
-        assert!(state.new_agent_mode); // still open
-        assert_eq!(state.new_agent_focus, NewAgentField::Cwd); // nudged
+        assert!(state.new_agent.mode); // still open
+        assert_eq!(state.new_agent.focus, NewAgentField::Cwd); // nudged
     }
 
     #[test]
@@ -2366,12 +2384,12 @@ mod tests {
         use crossterm::event::KeyCode;
         let mut state = AppState::default();
         state.open_new_agent("/tmp".into());
-        state.new_agent_focus = NewAgentField::Prompt;
+        state.new_agent.focus = NewAgentField::Prompt;
         // prompt is empty
         let result = state.apply_new_agent_key(KeyCode::Enter, false);
         assert!(result.is_none());
-        assert!(state.new_agent_mode); // still open
-        assert_eq!(state.new_agent_focus, NewAgentField::Prompt); // stays
+        assert!(state.new_agent.mode); // still open
+        assert_eq!(state.new_agent.focus, NewAgentField::Prompt); // stays
     }
 
     #[test]
@@ -2379,11 +2397,11 @@ mod tests {
         use crossterm::event::KeyCode;
         let mut state = AppState::default();
         state.open_new_agent("/tmp".into());
-        state.new_agent_input = "hello".into();
+        state.new_agent.input = "hello".into();
         state.apply_new_agent_key(KeyCode::Esc, false);
-        assert!(!state.new_agent_mode);
-        assert!(state.new_agent_input.is_empty());
-        assert!(state.new_agent_cwd_input.is_empty());
+        assert!(!state.new_agent.mode);
+        assert!(state.new_agent.input.is_empty());
+        assert!(state.new_agent.cwd_input.is_empty());
     }
 
     #[test]
@@ -2391,10 +2409,10 @@ mod tests {
         use crossterm::event::KeyCode;
         let mut state = AppState::default();
         state.open_new_agent("/tmp".into());
-        state.new_agent_input = "hello".into();
+        state.new_agent.input = "hello".into();
         state.apply_new_agent_key(KeyCode::Char('c'), true);
-        assert!(!state.new_agent_mode);
-        assert!(state.new_agent_input.is_empty());
+        assert!(!state.new_agent.mode);
+        assert!(state.new_agent.input.is_empty());
     }
 
     #[test]
@@ -2404,13 +2422,13 @@ mod tests {
         state.open_new_agent(String::new());
         // Focus starts on Cwd
         state.apply_new_agent_key(KeyCode::Char('a'), false);
-        assert_eq!(state.new_agent_cwd_input, "a");
-        assert!(state.new_agent_input.is_empty());
+        assert_eq!(state.new_agent.cwd_input, "a");
+        assert!(state.new_agent.input.is_empty());
 
-        state.new_agent_focus = NewAgentField::Prompt;
+        state.new_agent.focus = NewAgentField::Prompt;
         state.apply_new_agent_key(KeyCode::Char('b'), false);
-        assert_eq!(state.new_agent_input, "b");
-        assert_eq!(state.new_agent_cwd_input, "a"); // unchanged
+        assert_eq!(state.new_agent.input, "b");
+        assert_eq!(state.new_agent.cwd_input, "a"); // unchanged
     }
 
     #[test]
@@ -2420,7 +2438,7 @@ mod tests {
         state.open_new_agent(String::new());
         state.apply_new_agent_key(KeyCode::Char('\n'), false);
         state.apply_new_agent_key(KeyCode::Char('\r'), false);
-        assert!(state.new_agent_cwd_input.is_empty());
+        assert!(state.new_agent.cwd_input.is_empty());
     }
 
     // ── navigate_tmux_session ──────────────────────────────────────────────

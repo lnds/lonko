@@ -54,7 +54,7 @@ pub enum Event {
     },
     /// Result of the background `gh pr list` call kicked off when the user
     /// opens the PR picker. The picker stays in "loading…" until this event
-    /// lands; on error we stash the message in `AppState::pr_picker_error`.
+    /// lands; on error we stash the message in `AppState::pr_picker.error`.
     PrPickerLoaded {
         cwd: String,
         result: Result<Vec<crate::state::PrPickItem>, String>,

@@ -44,19 +44,19 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let cwd_focused = state.new_agent_focus == NewAgentField::Cwd;
-    let prompt_focused = state.new_agent_focus == NewAgentField::Prompt;
+    let cwd_focused = state.new_agent.focus == NewAgentField::Cwd;
+    let prompt_focused = state.new_agent.focus == NewAgentField::Prompt;
 
     // Dir field — when the input is ".", show the collapsed resolved path as a hint.
     let dir_label = " Dir ";
     let dir_avail = inner.width.saturating_sub(dir_label.len() as u16 + 1) as usize;
-    let is_dot = state.new_agent_cwd_input.trim() == ".";
+    let is_dot = state.new_agent.cwd_input.trim() == ".";
     let (dir_color, dir_cursor) = if cwd_focused { (TEXT, "▏") } else { (DIM, "") };
     let label_color = if cwd_focused { TEAL } else { DIM };
 
-    let dir_line = if is_dot && !state.new_agent_resolved_cwd.is_empty() {
+    let dir_line = if is_dot && !state.new_agent.resolved_cwd.is_empty() {
         // Show ". " + collapsed hint in dim
-        let hint = crate::new_agent::collapse_home(&state.new_agent_resolved_cwd);
+        let hint = crate::new_agent::collapse_home(&state.new_agent.resolved_cwd);
         let hint_avail = dir_avail.saturating_sub(3); // "." + " " + cursor
         let hint_text = truncate_left(&hint, hint_avail);
         Line::from(vec![
@@ -65,7 +65,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             Span::styled(hint_text, Style::default().fg(DIM)),
         ])
     } else {
-        let dir_text = truncate_left(&state.new_agent_cwd_input, dir_avail);
+        let dir_text = truncate_left(&state.new_agent.cwd_input, dir_avail);
         Line::from(vec![
             Span::styled(dir_label, Style::default().fg(label_color)),
             Span::styled(format!("{dir_text}{dir_cursor}"), Style::default().fg(dir_color)),
@@ -75,7 +75,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     // Prompt field
     let prompt_label = " ›  ";
     let prompt_avail = inner.width.saturating_sub(prompt_label.len() as u16 + 1) as usize;
-    let prompt_text = truncate_left(&state.new_agent_input, prompt_avail);
+    let prompt_text = truncate_left(&state.new_agent.input, prompt_avail);
     let (prompt_color, prompt_cursor) = if prompt_focused { (TEXT, "▏") } else { (DIM, "") };
 
     let prompt_line = Line::from(vec![

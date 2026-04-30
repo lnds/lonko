@@ -47,11 +47,11 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         help::render(frame);
     }
 
-    if state.new_agent_mode {
+    if state.new_agent.mode {
         new_agent::render(frame, state);
     }
 
-    if state.pr_picker_mode {
+    if state.pr_picker.mode {
         pr_picker::render(frame, state);
     }
 }

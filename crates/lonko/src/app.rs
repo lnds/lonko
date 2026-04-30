@@ -1065,20 +1065,20 @@ impl App {
                 // Drop the payload if the user already closed the picker or
                 // moved on to a different repo — otherwise we'd flash stale
                 // results into a fresh session.
-                if !self.state.pr_picker_mode
-                    || self.state.pr_picker_cwd.as_deref() != Some(cwd.as_str())
+                if !self.state.pr_picker.mode
+                    || self.state.pr_picker.cwd.as_deref() != Some(cwd.as_str())
                 {
                     return Ok(false);
                 }
-                self.state.pr_picker_loading = false;
+                self.state.pr_picker.loading = false;
                 match result {
                     Ok(prs) => {
-                        self.state.pr_picker_prs = prs;
-                        self.state.pr_picker_selected = 0;
-                        self.state.pr_picker_error = None;
+                        self.state.pr_picker.prs = prs;
+                        self.state.pr_picker.selected = 0;
+                        self.state.pr_picker.error = None;
                     }
                     Err(e) => {
-                        self.state.pr_picker_error = Some(e);
+                        self.state.pr_picker.error = Some(e);
                     }
                 }
             }
@@ -1388,7 +1388,7 @@ impl App {
 
     fn on_key(&mut self, key: crossterm::event::KeyEvent) -> Result<bool> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if self.state.bookmark_mode {
+        if self.state.bookmark.mode {
             if let Some(note) = self.state.apply_bookmark_key(key.code, ctrl)
                 && let Some(session) = self.state.selected_session() {
                     let cwd = session.cwd.clone();
@@ -1401,13 +1401,13 @@ impl App {
                 }
             return Ok(false);
         }
-        if self.state.new_agent_mode {
+        if self.state.new_agent.mode {
             if let Some((prompt, cwd)) = self.state.apply_new_agent_key(key.code, ctrl) {
                 self.spawn_new_agent(&cwd, &prompt);
             }
             return Ok(false);
         }
-        if self.state.pr_picker_mode {
+        if self.state.pr_picker.mode {
             // Ctrl-C exits lonko entirely (same as the main handler). This
             // keeps the shortcut consistent even when a modal is open — the
             // previous "swallow Ctrl-C to close the modal" behavior left
@@ -1424,9 +1424,9 @@ impl App {
             }
             return Ok(false);
         }
-        if self.state.worktree_mode {
+        if self.state.worktree.mode {
             if let Some(branch) = self.state.apply_worktree_key(key.code, ctrl) {
-                let cwd = self.state.worktree_cwd.take().unwrap_or_default();
+                let cwd = self.state.worktree.cwd.take().unwrap_or_default();
                 if !cwd.is_empty() {
                     self.spawn_worktree(&cwd, &branch);
                 }
@@ -1579,11 +1579,11 @@ impl App {
             KeyCode::Char('b') if self.state.active_tab == Tab::Agents => {
                 if let Some(session) = self.state.selected_session() {
                     let cwd = session.cwd.clone();
-                    self.state.bookmark_input = self.state.bookmarks
+                    self.state.bookmark.input = self.state.bookmarks
                         .get(&cwd)
                         .cloned()
                         .unwrap_or_default();
-                    self.state.bookmark_mode = true;
+                    self.state.bookmark.mode = true;
                 }
             }
             KeyCode::Char('g') if self.state.active_tab == Tab::Agents => {
@@ -1875,9 +1875,9 @@ impl App {
         };
         let Some(cwd) = cwd else { return };
         if crate::worktree::git_root(&cwd).is_none() { return; }
-        self.state.worktree_cwd = Some(cwd);
-        self.state.worktree_input.clear();
-        self.state.worktree_mode = true;
+        self.state.worktree.cwd = Some(cwd);
+        self.state.worktree.input.clear();
+        self.state.worktree.mode = true;
     }
 
     /// Create a git worktree and launch Claude in a new tmux session.
@@ -1945,13 +1945,13 @@ impl App {
             tmux::display_message("pr-picker: `gh` CLI not found");
             return;
         }
-        self.state.pr_picker_mode = true;
-        self.state.pr_picker_loading = true;
-        self.state.pr_picker_error = None;
-        self.state.pr_picker_prs.clear();
-        self.state.pr_picker_selected = 0;
-        self.state.pr_picker_query.clear();
-        self.state.pr_picker_cwd = Some(cwd.clone());
+        self.state.pr_picker.mode = true;
+        self.state.pr_picker.loading = true;
+        self.state.pr_picker.error = None;
+        self.state.pr_picker.prs.clear();
+        self.state.pr_picker.selected = 0;
+        self.state.pr_picker.query.clear();
+        self.state.pr_picker.cwd = Some(cwd.clone());
 
         let Some(ref tx) = self.scan_tx else { return };
         let tx = tx.clone();
