@@ -116,21 +116,17 @@ CURRENT_LAYOUT_FILE="$LAYOUT_DIR/${CURRENT_WIN}.layout"
 tmux display-message -t "$CURRENT_WIN" -p '#{window_layout}' > "$CURRENT_LAYOUT_FILE"
 
 # Use the user's persisted sidebar width preference (written by lonko
-# every few ticks when the panel is stable). The value is an absolute
-# column count clamped to [20, 200] on the writer side. Falls back to
-# 25% when the file is missing (first run, never resized).
-#
-# Reading the live `pane_width` here was tried and was unstable: the
-# value drifts due to layout auto-balancing in some destination window
-# configurations, and percentages also truncated monotonically. A
-# persisted preference, only updated when the panel is NOT moving,
-# avoids both classes of regression.
-PREF_WIDTH_FILE="$HOME/.cache/lonko-width.col"
+# every few ticks when the panel is stable). Stored as percentage
+# (10–70) rather than absolute cols so the value survives multi-client
+# tmux setups where `window-size = latest` rescales the destination
+# window when `switch-client` activates a differently-sized client.
+# Falls back to 25% when the file is missing (first run, never resized).
+PREF_WIDTH_FILE="$HOME/.cache/lonko-width.pct"
 WIDTH_SPEC="25%"
 if [ -f "$PREF_WIDTH_FILE" ]; then
     pref=$(cat "$PREF_WIDTH_FILE" 2>/dev/null)
     if [ -n "$pref" ] && [ "$pref" -gt 0 ]; then
-        WIDTH_SPEC="$pref"
+        WIDTH_SPEC="${pref}%"
     fi
 fi
 

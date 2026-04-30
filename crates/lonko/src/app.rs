@@ -19,26 +19,30 @@ use crate::{
 // ── Pure helpers (testable without App) ────────────────────────────────────────
 
 /// Write the no-follow sentinel so lonko-follow.sh skips the next hook trigger.
-/// Path of the persisted user-preferred sidebar width. Both the Rust
-/// process and `lonko-follow.sh` read this file so the panel keeps
-/// the user's chosen width across every move.
+/// Path of the persisted user-preferred sidebar width as a percentage
+/// (0–100). Both the Rust process and `lonko-follow.sh` read this file
+/// so the panel keeps the user's chosen proportion across every move.
+/// Stored as percentage rather than absolute columns because tmux's
+/// `window-size = latest` rescales windows when the active client
+/// changes, and absolute cols would shrink visibly every time the
+/// user navigates to a window attached by a differently-sized client.
 fn preferred_width_path() -> std::path::PathBuf {
-    crate::state::lonko_cache_dir().join("lonko-width.col")
+    crate::state::lonko_cache_dir().join("lonko-width.pct")
 }
 
 fn load_preferred_width() -> Option<u32> {
     let path = preferred_width_path();
     let content = std::fs::read_to_string(&path).ok()?;
-    let cols: u32 = content.trim().parse().ok()?;
-    if (20..=200).contains(&cols) { Some(cols) } else { None }
+    let pct: u32 = content.trim().parse().ok()?;
+    if (10..=70).contains(&pct) { Some(pct) } else { None }
 }
 
-fn save_preferred_width(cols: u32) -> std::io::Result<()> {
+fn save_preferred_width(pct: u32) -> std::io::Result<()> {
     let path = preferred_width_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, cols.to_string())
+    std::fs::write(path, pct.to_string())
 }
 
 pub fn write_no_follow_sentinel() {
@@ -311,13 +315,16 @@ pub struct App {
     /// (auto-balance from named layouts, brief `pane_width` drift) do
     /// not pollute the user's manually-set preference.
     last_move_at: Option<std::time::Instant>,
-    /// User's preferred lonko sidebar width in columns, persisted to
-    /// `~/.cache/lonko-width.col`. Captured by a periodic poll of
-    /// `pane_width(own_pane)` when no move is in flight, so manual
-    /// resizes (tmux mouse drag, prefix-Ctrl-arrow) propagate to all
-    /// subsequent `tmux join-pane -l <cols>` calls. Falls back to
-    /// `"25%"` when None (first run).
-    preferred_width_cols: Option<u32>,
+    /// User's preferred lonko sidebar width as a percentage of the
+    /// containing window (10–70), persisted to `~/.cache/lonko-width.pct`.
+    /// Captured by a periodic poll of `pane_width_pct(own_pane)` when
+    /// no move is in flight, so manual resizes propagate to every
+    /// subsequent `tmux join-pane -l <pct>%` call. Percentage rather
+    /// than absolute cols so the value survives multi-client setups
+    /// where `window-size = latest` rescales the destination window
+    /// when the active client changes after a `switch-client`.
+    /// Falls back to `25%` when None (first run).
+    preferred_width_pct: Option<u32>,
 }
 
 impl App {
@@ -346,7 +353,7 @@ impl App {
             remote_online_hosts: std::collections::HashSet::new(),
             panel_moving_until: None,
             last_move_at: None,
-            preferred_width_cols: load_preferred_width(),
+            preferred_width_pct: load_preferred_width(),
         }
     }
 
@@ -361,25 +368,23 @@ impl App {
     }
 
     /// Periodic poll: when the panel hasn't moved for a few seconds,
-    /// query the live `pane_width` and treat any change as the user
-    /// having manually resized the sidebar. Update the in-memory cache
-    /// AND persist to disk so `lonko-follow.sh` (a separate process)
-    /// uses the same value on its next join.
+    /// query the live width-as-percentage and treat any change as the
+    /// user having manually resized the sidebar. Updates the in-memory
+    /// cache AND persists to disk so `lonko-follow.sh` (a separate
+    /// process) reads the same value on its next join.
     ///
-    /// Bounded to [20, 200] cols: a malformed query or some weird
-    /// fullscreen edge case shouldn't be able to set a degenerate
-    /// preference that would break future joins.
+    /// Stored as percentage so the value survives `window-size = latest`
+    /// rescales in multi-client tmux setups (see field doc).
     fn refresh_preferred_width(&mut self) {
         let stable = self.last_move_at
             .map(|t| t.elapsed() > std::time::Duration::from_secs(5))
             .unwrap_or(true);
         if !stable { return; }
         let Some(own) = self.state.own_pane.as_deref() else { return };
-        let Some(cols) = tmux::pane_width(own) else { return };
-        if !(20..=200).contains(&cols) { return; }
-        if self.preferred_width_cols == Some(cols) { return; }
-        self.preferred_width_cols = Some(cols);
-        let _ = save_preferred_width(cols);
+        let Some(pct) = tmux::pane_width_pct(own) else { return };
+        if self.preferred_width_pct == Some(pct) { return; }
+        self.preferred_width_pct = Some(pct);
+        let _ = save_preferred_width(pct);
     }
 
     /// Schedule a transcript read + git_branch lookup off the event loop.
@@ -1093,15 +1098,14 @@ impl App {
             // Same pattern `attach_remote_agent` uses for the same race.
             write_no_follow_sentinel();
             refresh_no_follow_sentinel_async();
-            // Use the persisted user-preferred width so the panel
-            // keeps the size the user has chosen across every move.
-            // The preference is captured by `refresh_preferred_width`
-            // running on a periodic tick when no move is in flight,
-            // so post-join layout transients never overwrite a
-            // deliberate resize. Falls back to `25%` when no
-            // preference has been recorded yet (first run).
-            let spec = self.preferred_width_cols
-                .map(|c| c.to_string())
+            // Use the persisted user-preferred width as a percentage
+            // so the panel keeps its proportion across every move,
+            // including across destination windows attached by
+            // differently-sized clients (`window-size = latest`
+            // rescales the window on switch-client). Falls back to
+            // `25%` when no preference has been recorded yet.
+            let spec = self.preferred_width_pct
+                .map(|p| format!("{p}%"))
                 .unwrap_or_else(|| "25%".to_string());
             let _ = tmux::join_pane_right(own, &target_win, &spec);
         }

@@ -81,18 +81,26 @@ pub fn select_last_pane() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Current width of `pane_id` in columns. Used by the panel-width
-/// preference tracker to detect when the user manually resizes lonko's
-/// pane, so the new value can be persisted and used by every subsequent
-/// `tmux join-pane` call.
-pub fn pane_width(pane_id: &str) -> Option<u32> {
-    let output = Command::new("tmux")
-        .args(["display-message", "-t", pane_id, "-p", "#{pane_width}"])
-        .output()
-        .ok()?;
+/// Width of `pane_id` as a percentage of its window's current width.
+/// Used by the panel-width preference tracker so the value survives
+/// destinations that get rescaled by `window-size = latest` in
+/// multi-client setups: storing absolute cols would shrink the panel
+/// every time the user navigates to a window attached by a wider
+/// client, because the post-`switch-client` rescale halves the
+/// actual columns.
+pub fn pane_width_pct(pane_id: &str) -> Option<u32> {
+    let pane_w: u32 = display_message_int(&["-t", pane_id, "-p", "#{pane_width}"])?;
+    let win_w: u32 = display_message_int(&["-t", pane_id, "-p", "#{window_width}"])?;
+    if win_w == 0 { return None; }
+    Some((pane_w.saturating_mul(100) / win_w).clamp(10, 70))
+}
+
+fn display_message_int(args: &[&str]) -> Option<u32> {
+    let mut full = vec!["display-message"];
+    full.extend(args);
+    let output = Command::new("tmux").args(&full).output().ok()?;
     if !output.status.success() { return None; }
-    let s = String::from_utf8(output.stdout).ok()?;
-    s.trim().parse::<u32>().ok()
+    String::from_utf8(output.stdout).ok()?.trim().parse().ok()
 }
 
 /// Return the pane ID currently active in the main tmux client.
