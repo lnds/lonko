@@ -1,3 +1,13 @@
+## v0.19.9 (2026-04-29)
+
+### Fix
+
+- **panel**: preserve sidebar width across window switches
+
+### Perf
+
+- **app**: defer transcript parse and git_branch off the event loop
+
 ## v0.19.8 (2026-04-29)
 
 ### Fix
