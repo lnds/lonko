@@ -348,9 +348,30 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let show_search = state.search_mode || !state.search_query.is_empty();
     let search_h = if show_search { 1u16 } else { 0 };
 
+    // NEEDS YOU section: pin agents waiting for permission to the
+    // bottom of the sidebar regardless of scroll position. Up to 3
+    // agent rows + 1 header (+ 1 overflow row when there are more).
+    // Hidden entirely when no agent is waiting.
+    let waiting: Vec<&Session> = state
+        .sessions
+        .iter()
+        .filter(|s| s.status.is_waiting())
+        .collect();
+    let needs_h: u16 = if waiting.is_empty() {
+        0
+    } else {
+        let visible_rows = waiting.len().min(3) as u16;
+        let overflow = if waiting.len() > 3 { 1u16 } else { 0 };
+        1 + visible_rows + overflow
+    };
+
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(search_h)])
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(search_h),
+            Constraint::Length(needs_h),
+        ])
         .split(area);
 
     let list_area = layout[0];
@@ -363,6 +384,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             Span::styled(cursor, Style::default().fg(BLUE)),
         ]);
         frame.render_widget(Paragraph::new(bar), layout[1]);
+    }
+
+    if needs_h > 0 {
+        render_needs_you(frame, layout[2], &waiting);
     }
 
     let visible = state.visible_sessions();
@@ -967,6 +992,117 @@ fn status_color(status: &SessionStatus) -> Color {
         SessionStatus::Completed => TEAL,
         _ => DIM,
     }
+}
+
+/// Render the pinned "⚠ NEEDS YOU" section at the bottom of the sidebar.
+/// Always-visible attention magnet for agents waiting on a permission
+/// prompt: the user never has to scroll the agent list to find who is
+/// blocking. `y/n/w` keys still target the first waiting agent
+/// regardless of selection (handled by `App::send_permission`), so this
+/// section is read-only — it draws attention, it doesn't gate input.
+///
+/// Layout: 1 header line + up to 3 agent rows. When more than 3 are
+/// waiting, the third row is replaced by `+N more`. Each agent row is
+/// `⚠ <label>  <truncated permission message>` on a single line.
+fn render_needs_you(frame: &mut Frame, area: Rect, waiting: &[&Session]) {
+    if area.width == 0 || area.height == 0 || waiting.is_empty() {
+        return;
+    }
+
+    let header_area = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
+    let count = waiting.len();
+    let label = format!(" ⚠ NEEDS YOU ({count}) ");
+    let label_cols = UnicodeWidthStr::width(label.as_str());
+    let total = area.width as usize;
+    let left_dashes = 2usize;
+    let right_dashes = total.saturating_sub(left_dashes + label_cols);
+    let header_line = Line::from(vec![
+        Span::styled("─".repeat(left_dashes), Style::default().fg(ORANGE)),
+        Span::styled(
+            label,
+            Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("─".repeat(right_dashes), Style::default().fg(ORANGE)),
+    ]);
+    frame.render_widget(Paragraph::new(header_line), header_area);
+
+    // Show up to 3 agents. With 4+ waiting, the third row turns into
+    // a `+N more` overflow line. The list is taken in source order;
+    // typically the first one is the oldest still-blocking prompt.
+    let max_visible = 3usize;
+    let overflow = waiting.len() > max_visible;
+    let shown = if overflow { max_visible - 1 } else { waiting.len().min(max_visible) };
+
+    for (i, s) in waiting.iter().take(shown).enumerate() {
+        let row_y = area.y + 1 + i as u16;
+        if row_y >= area.y + area.height { break; }
+        let row_area = Rect { x: area.x, y: row_y, width: area.width, height: 1 };
+        render_needs_you_row(frame, row_area, s);
+    }
+
+    if overflow {
+        let extra = waiting.len() - shown;
+        let row_y = area.y + 1 + shown as u16;
+        if row_y < area.y + area.height {
+            let row_area = Rect { x: area.x, y: row_y, width: area.width, height: 1 };
+            let line = Line::from(vec![
+                Span::styled(format!("  +{extra} more waiting"), Style::default().fg(DIM)),
+            ]);
+            frame.render_widget(Paragraph::new(line), row_area);
+        }
+    }
+}
+
+fn render_needs_you_row(frame: &mut Frame, area: Rect, session: &Session) {
+    let label = session.display_name();
+    let msg = match &session.status {
+        SessionStatus::WaitingForUser(m) => m.as_str(),
+        _ => "",
+    };
+    // Compose: "⚠ <label>  <msg…>" within area.width columns.
+    // Reserve 2 cols for the icon + space, 2 cols of separator before the
+    // message, and never let either side overflow the row.
+    let total = area.width as usize;
+    let icon_cols = 2; // "⚠ "
+    let sep_cols = 2;  // "  "
+    let label_cols = UnicodeWidthStr::width(label).min(total.saturating_sub(icon_cols + sep_cols + 1));
+    let label_truncated = truncate_to_cols(label, label_cols);
+    let used = icon_cols + label_cols + sep_cols;
+    let msg_cols = total.saturating_sub(used);
+    let msg_truncated = truncate_to_cols(msg, msg_cols);
+
+    let line = Line::from(vec![
+        Span::styled("⚠ ", Style::default().fg(ORANGE_PULSE)),
+        Span::styled(label_truncated, Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
+        Span::styled("  ", Style::default()),
+        Span::styled(msg_truncated, Style::default().fg(SUBTLE)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn truncate_to_cols(s: &str, max_cols: usize) -> String {
+    if max_cols == 0 { return String::new(); }
+    let mut acc = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > max_cols {
+            // Drop the last char if needed to fit a single-column ellipsis,
+            // matching the truncation pattern used elsewhere in the list.
+            while used + 1 > max_cols && !acc.is_empty() {
+                if let Some(prev) = acc.pop() {
+                    used = used.saturating_sub(unicode_width::UnicodeWidthChar::width(prev).unwrap_or(0));
+                }
+            }
+            if used < max_cols {
+                acc.push('…');
+            }
+            return acc;
+        }
+        acc.push(ch);
+        used += w;
+    }
+    acc
 }
 
 /// Render a one-line divider that separates local agents from the remote
