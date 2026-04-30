@@ -19,32 +19,6 @@ use crate::{
 // ── Pure helpers (testable without App) ────────────────────────────────────────
 
 /// Write the no-follow sentinel so lonko-follow.sh skips the next hook trigger.
-/// Path of the persisted user-preferred sidebar width as a percentage
-/// (0–100). Both the Rust process and `lonko-follow.sh` read this file
-/// so the panel keeps the user's chosen proportion across every move.
-/// Stored as percentage rather than absolute columns because tmux's
-/// `window-size = latest` rescales windows when the active client
-/// changes, and absolute cols would shrink visibly every time the
-/// user navigates to a window attached by a differently-sized client.
-fn preferred_width_path() -> std::path::PathBuf {
-    crate::state::lonko_cache_dir().join("lonko-width.pct")
-}
-
-fn load_preferred_width() -> Option<u32> {
-    let path = preferred_width_path();
-    let content = std::fs::read_to_string(&path).ok()?;
-    let pct: u32 = content.trim().parse().ok()?;
-    if (10..=70).contains(&pct) { Some(pct) } else { None }
-}
-
-fn save_preferred_width(pct: u32) -> std::io::Result<()> {
-    let path = preferred_width_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, pct.to_string())
-}
-
 pub fn write_no_follow_sentinel() {
     let sentinel = crate::state::lonko_cache_dir().join("lonko-no-follow");
     // Ensure the cache dir exists — on a fresh install it may not,
@@ -309,22 +283,6 @@ pub struct App {
     /// Set this to `now + 500ms` at the start of every move op; the
     /// alone-detection short-circuits while it is in the future.
     panel_moving_until: Option<std::time::Instant>,
-    /// Timestamp of the most recent `mark_panel_moving` call. The
-    /// preferred-width tracker uses this to skip its periodic poll
-    /// for a few seconds after a move, so post-join layout transients
-    /// (auto-balance from named layouts, brief `pane_width` drift) do
-    /// not pollute the user's manually-set preference.
-    last_move_at: Option<std::time::Instant>,
-    /// User's preferred lonko sidebar width as a percentage of the
-    /// containing window (10–70), persisted to `~/.cache/lonko-width.pct`.
-    /// Captured by a periodic poll of `pane_width_pct(own_pane)` when
-    /// no move is in flight, so manual resizes propagate to every
-    /// subsequent `tmux join-pane -l <pct>%` call. Percentage rather
-    /// than absolute cols so the value survives multi-client setups
-    /// where `window-size = latest` rescales the destination window
-    /// when the active client changes after a `switch-client`.
-    /// Falls back to `25%` when None (first run).
-    preferred_width_pct: Option<u32>,
 }
 
 impl App {
@@ -352,59 +310,15 @@ impl App {
             remote_bridge_starting: std::collections::HashSet::new(),
             remote_online_hosts: std::collections::HashSet::new(),
             panel_moving_until: None,
-            last_move_at: None,
-            preferred_width_pct: load_preferred_width(),
         }
     }
 
     /// Mark the panel as currently moving between tmux windows/sessions.
     /// `should_self_quit_when_alone` returns false until the deadline expires.
-    /// `last_move_at` is also stamped so the preferred-width tracker
-    /// skips its poll until post-move layout transients have settled.
     fn mark_panel_moving(&mut self) {
-        let now = std::time::Instant::now();
-        self.panel_moving_until = Some(now + std::time::Duration::from_millis(500));
-        self.last_move_at = Some(now);
-    }
-
-    /// Periodic poll: when the panel hasn't moved for a few seconds,
-    /// query the live width-as-percentage and treat any change as the
-    /// user having manually resized the sidebar. Updates the in-memory
-    /// cache AND persists to disk so `lonko-follow.sh` (a separate
-    /// process) reads the same value on its next join.
-    ///
-    /// Stored as percentage so the value survives `window-size = latest`
-    /// rescales in multi-client tmux setups (see field doc).
-    fn refresh_preferred_width(&mut self) {
-        let stable = self.last_move_at
-            .map(|t| t.elapsed() > std::time::Duration::from_secs(5))
-            .unwrap_or(true);
-        if !stable { return; }
-        let Some(own) = self.state.own_pane.as_deref() else { return };
-        // Skip when lonko is parked in `lonko-tray` (hidden) or in a
-        // floating popup session — both cases have lonko as the sole
-        // pane, so its width is ~100% of the host window and the
-        // capture would store 70% (clamp ceiling) as the user's
-        // preference. The next focus move would then join lonko at
-        // 70% of the destination, producing a gigantic sidebar.
-        let session = tmux::tmux_session_for_pane(own);
-        let is_internal = session.as_deref().is_some_and(|s| {
-            s == "lonko-tray" || s.starts_with("floating-") || s.starts_with("remote/")
-        });
-        if is_internal { return; }
-        let Some(pct) = tmux::pane_width_pct(own) else { return };
-        // Require a meaningful change before overwriting the preference.
-        // Even with half-up rounding, post-rescale tmux can briefly
-        // report 1pp off; treating that as a manual resize would drift
-        // the preference downward over time. Genuine manual resizes
-        // are usually 5+pp; 2pp is a safe threshold.
-        if let Some(prev) = self.preferred_width_pct
-            && prev.abs_diff(pct) < 2
-        {
-            return;
-        }
-        self.preferred_width_pct = Some(pct);
-        let _ = save_preferred_width(pct);
+        self.panel_moving_until = Some(
+            std::time::Instant::now() + std::time::Duration::from_millis(500)
+        );
     }
 
     /// Schedule a transcript read + git_branch lookup off the event loop.
@@ -946,8 +860,13 @@ impl App {
     }
 
     /// Hide the panel by moving it back to lonko-tray (lonko keeps running).
+    /// No-op when lonko is already in `lonko-tray` so callers can invoke
+    /// this unconditionally after a `switch-client`.
     fn hide_panel(&self) {
         let Some(ref own) = self.state.own_pane else { return };
+        if tmux::tmux_session_for_pane(own).as_deref() == Some("lonko-tray") {
+            return;
+        }
 
         // Capture the window id before break-pane so we can restore its layout.
         let win_id = std::process::Command::new("tmux")
@@ -1069,69 +988,57 @@ impl App {
         }
     }
 
-    /// Focus a local agent pane as smoothly as possible:
-    ///   - Fast path: when the pane already lives in lonko's window, a
-    ///     plain `select-pane` focuses it without a client-session-changed
-    ///     round-trip.
-    ///   - Slow path: pre-move lonko's own pane into the target window
-    ///     via `join-pane` BEFORE `switch-client`, so the user arrives to
-    ///     a window that already has the sidebar in place (no flash, no
-    ///     post-arrival reflow). We skip the pre-move when the target
-    ///     window already has a lonko (e.g. an ssh pane whose remote tmux
-    ///     carries its own sidebar — moving ours in would stack two
-    ///     panels, LONKO-53).
+    /// Switch the user's client to the agent's window and hide lonko
+    /// back into `lonko-tray`. The previous design pre-moved lonko's
+    /// own pane into the target window via `join-pane` BEFORE the
+    /// `switch-client`, so the sidebar would already be in place when
+    /// the user arrived. That added a constant tax of bugs in
+    /// multi-client setups: `tmux join-pane -l N%` computes the
+    /// percentage on the destination's CURRENT width, but
+    /// `window-size = latest` rescales the window AFTER the
+    /// switch-client to the active client's size. The size lonko
+    /// requested no longer corresponded to what the user saw, and
+    /// every approach to fix it (cols, percent, persisted preference,
+    /// half-up rounding, threshold) opened a new edge case.
     ///
-    /// The no-follow sentinel is written before the pre-move so any hook
-    /// that races in finds lonko already parked where it belongs and
-    /// exits via the `already-here` branch instead of redoing the move.
+    /// Now: lonko is stationary in `lonko-tray`. On agent navigation
+    /// we just switch the client and hide the panel. The user can
+    /// re-summon lonko with `super+s` when they need it. Permission
+    /// prompts auto-show lonko (see `auto_show_panel`) so attention-
+    /// urgent agents aren't lost just because the sidebar is hidden.
     fn focus_local_agent_pane(&mut self, pane: &str) {
-        self.mark_panel_moving();
-        let Some(target_win) = tmux::tmux_window_for_pane(pane) else {
-            // Can't resolve the target window — fall back to the plain
-            // select + switch-client pair so focus still works, albeit
-            // with the older flicker.
-            let _ = tmux::select_pane(pane);
-            let _ = tmux::focus_pane(pane);
-            return;
-        };
-
-        // Compare against *lonko's* window explicitly — using the client's
-        // "current window" misfires when lonko lives in one session and
-        // the user's client is on another (e.g. lonko-tray).
-        let lonko_win = self.state.own_pane
-            .as_deref()
-            .and_then(tmux::tmux_window_for_pane);
-
-        if lonko_win.as_deref() == Some(target_win.as_str()) {
-            let _ = tmux::select_pane(pane);
-            return;
-        }
-
-        if let Some(own) = self.state.own_pane.as_deref()
-            && !tmux::window_has_lonko_pane(&target_win)
-        {
-            // Suppress the follow script for the duration of the move:
-            // the `focus_pane` switch-client below fires both
-            // `client-session-changed` and `after-select-window`, and
-            // the sentinel is consumed by the first one — refresh
-            // across ~200 ms so the second hook sees a fresh file too.
-            // Same pattern `attach_remote_agent` uses for the same race.
-            write_no_follow_sentinel();
-            refresh_no_follow_sentinel_async();
-            // Use the persisted user-preferred width as a percentage
-            // so the panel keeps its proportion across every move,
-            // including across destination windows attached by
-            // differently-sized clients (`window-size = latest`
-            // rescales the window on switch-client). Falls back to
-            // `25%` when no preference has been recorded yet.
-            let spec = self.preferred_width_pct
-                .map(|p| format!("{p}%"))
-                .unwrap_or_else(|| "25%".to_string());
-            let _ = tmux::join_pane_right(own, &target_win, &spec);
-        }
-
         let _ = tmux::select_pane(pane);
         let _ = tmux::focus_pane(pane);
+        self.hide_panel();
+    }
+
+    /// Auto-show lonko alongside the user's current window. Used when
+    /// an agent transitions to `WaitingForUser` so the user gets an
+    /// inline permission prompt without having to invoke the panel by
+    /// hand.
+    ///
+    /// No-op when lonko is already visible (not in `lonko-tray`), when
+    /// the user's window already has a lonko pane (e.g. an SSH attach
+    /// to a remote whose tmux carries its own sidebar), or when
+    /// lonko's pane id can't be resolved (cold start).
+    ///
+    /// Joins with `-d` so the user keeps focus on their working pane;
+    /// `cmd+shift+y/n/w` answers the prompt without grabbing the cursor.
+    fn auto_show_panel(&self) {
+        let Some(own) = self.state.own_pane.as_deref() else { return };
+        let Some(session) = tmux::tmux_session_for_pane(own) else { return };
+        if session != "lonko-tray" { return; }
+        let Some(client) = tmux::find_main_client() else { return };
+        let cur_win = std::process::Command::new("tmux")
+            .args(["display-message", "-c", &client, "-p", "#{window_id}"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let Some(cur_win) = cur_win else { return };
+        if tmux::window_has_lonko_pane(&cur_win) { return; }
+        let _ = tmux::join_pane_right(own, &cur_win, "25%");
     }
 
     fn refresh_selected_transcript(&self) {
@@ -1163,6 +1070,11 @@ impl App {
         let pid = session.pid;
         let session_id = session.id.clone();
         let host = session.host.clone();
+        // Capture the agent label up front so we can surface it in the
+        // post-response notification — once the panel auto-hides, the
+        // user has no other cue indicating which agent received the
+        // y/n/w they just pressed.
+        let display_name = session.display_name().to_string();
         // For remote sessions there is no usable local PID, so we can only
         // trust whatever pane ID the bridge already propagated.
         let pane = if host.is_some() {
@@ -1183,6 +1095,38 @@ impl App {
         };
         if let Err(e) = result {
             tracing::warn!("send_permission failed: {e}");
+            return;
+        }
+
+        // Surface which agent the response went to. Stationary-panel
+        // model means lonko hides as soon as no agent is still
+        // waiting, so without this notification the user has no
+        // record of which prompt they just answered.
+        let action = match key {
+            "1" | "y" => "approved",
+            "3" | "w" => "always allowed",
+            _         => "denied",
+        };
+        let summary = format!("lonko · {display_name} · {action}");
+        std::thread::spawn(move || {
+            let _ = notify_rust::Notification::new()
+                .summary(&summary)
+                .timeout(notify_rust::Timeout::Milliseconds(4000))
+                .show();
+        });
+
+        // Auto-hide once no agent is still waiting. The hook that
+        // actually flips this session's status to non-waiting hasn't
+        // landed yet (the agent's `Stop` is what does that), so
+        // optimistically count this session as no-longer-waiting:
+        // anything else still in `is_waiting()` means the user has
+        // more work to do and lonko should remain visible.
+        let still_waiting = self.state.sessions
+            .iter()
+            .filter(|s| s.id != session_id)
+            .any(|s| s.status.is_waiting());
+        if !still_waiting {
+            self.hide_panel();
         }
     }
 
@@ -1332,24 +1276,43 @@ impl App {
             session.status = new_status;
         }
 
-        // Desktop notification when session needs attention and Ghostty is not in focus
+        // Snapshot every value out of `session` before the `&self`
+        // calls below. After this block the mutable borrow on
+        // `self.state.sessions` ends, so we can call `auto_show_panel`
+        // and `spawn_transcript_load` without fighting the checker.
+        let is_waiting = matches!(session.status, SessionStatus::WaitingForUser(_));
+        let display_name = session.display_name().to_string();
+        let status_for_notif = session.status.clone();
+        let transcript_seed = if matches!(event_name, "Stop" | "SubagentStop") {
+            let session_id = session.id.clone();
+            let cwd = session.cwd.clone();
+            let path = session.transcript_path.clone()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| transcript::transcript_path(&session.cwd, &session.id));
+            Some((session_id, path, cwd))
+        } else {
+            None
+        };
+
+        // Two distinct paths depending on whether the user is at the
+        // keyboard. When Ghostty is NOT focused, fire a desktop
+        // notification so the user gets pulled in via macOS notif
+        // center. When Ghostty IS focused and an agent needs the
+        // user, auto-show lonko alongside the user's current window
+        // so the permission prompt is visible inline without dragging
+        // them away from their working pane (`-d` keeps focus on the
+        // agent).
         if !ghostty::has_focus() {
-            notify_if_needed(session.display_name(), &session.status);
+            notify_if_needed(&display_name, &status_for_notif);
+        } else if is_waiting {
+            self.auto_show_panel();
         }
 
         // Defer the transcript parse + git_branch fork off the event loop
         // for any Stop-style hook. Status update is already done above;
         // the deferred result lands as `TranscriptInfoLoaded` and refines
         // model / cost / last_prompt / branch on the same session.
-        if matches!(event_name, "Stop" | "SubagentStop") {
-            let session_id = session.id.clone();
-            let cwd = session.cwd.clone();
-            let path = session.transcript_path.clone()
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| transcript::transcript_path(&session.cwd, &session.id));
-            // `session`'s last use is the line above; NLL drops the
-            // mutable borrow on `self.state.sessions` here, freeing
-            // self for the &self call below.
+        if let Some((session_id, path, cwd)) = transcript_seed {
             self.spawn_transcript_load(session_id, path, cwd);
         }
     }
@@ -1509,12 +1472,6 @@ impl App {
 
     fn on_tick(&mut self) {
         self.state.tick = self.state.tick.wrapping_add(1);
-        // Capture user manual resizes of the sidebar every ~3 s. Skips
-        // until at least 5 s after the last move so post-join layout
-        // transients can't be mistaken for a deliberate resize.
-        if self.state.tick.is_multiple_of(30) {
-            self.refresh_preferred_width();
-        }
         // Poll the active tmux pane every ~1s to keep the focused session
         // current. The two-fork query (list-clients + display-message)
         // runs on `spawn_blocking` and lands as `Event::ActivePaneRefreshed`

@@ -81,35 +81,6 @@ pub fn select_last_pane() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Width of `pane_id` as a percentage of its window's current width.
-/// Used by the panel-width preference tracker so the value survives
-/// destinations that get rescaled by `window-size = latest` in
-/// multi-client setups: storing absolute cols would shrink the panel
-/// every time the user navigates to a window attached by a wider
-/// client, because the post-`switch-client` rescale halves the
-/// actual columns.
-///
-/// Round-half-up the result, NOT integer truncation. Truncation drifts
-/// the percentage downward each switch: 31/127 = 24.4% → 24% join → 30
-/// cols → 23.6% → 23% join → 28 cols → 22% → ... Half-up rounding
-/// keeps 30/127 → 24% (same as 31/127), so the preference stays stable
-/// across the rescale-and-poll cycle.
-pub fn pane_width_pct(pane_id: &str) -> Option<u32> {
-    let pane_w: u32 = display_message_int(&["-t", pane_id, "-p", "#{pane_width}"])?;
-    let win_w: u32 = display_message_int(&["-t", pane_id, "-p", "#{window_width}"])?;
-    if win_w == 0 { return None; }
-    let scaled = pane_w.saturating_mul(100).saturating_add(win_w / 2);
-    Some((scaled / win_w).clamp(10, 70))
-}
-
-fn display_message_int(args: &[&str]) -> Option<u32> {
-    let mut full = vec!["display-message"];
-    full.extend(args);
-    let output = Command::new("tmux").args(&full).output().ok()?;
-    if !output.status.success() { return None; }
-    String::from_utf8(output.stdout).ok()?.trim().parse().ok()
-}
-
 /// Return the pane ID currently active in the main tmux client.
 pub fn active_pane() -> Option<String> {
     let client = find_main_client()?;

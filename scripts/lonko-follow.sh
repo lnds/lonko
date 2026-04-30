@@ -95,6 +95,20 @@ if [ -z "$LONKO_PANE" ]; then
     exit 0
 fi
 
+# Stationary panel model: lonko stays in `lonko-tray` (its dedicated
+# session) by default. The user re-summons it explicitly via
+# `super+s` (lonko-panel.sh) and lonko itself decides when to
+# auto-show on permission prompts. The hook should NOT pull lonko
+# out of the tray on every window switch — that was the old "follow"
+# model and it produced an endless stream of width / layout bugs in
+# multi-client setups.
+LONKO_SESSION=$(tmux list-panes -aF "#{pane_id} #{session_name}" \
+    | awk -v p="$LONKO_PANE" '$1==p {print $2}' | head -1)
+if [ "$LONKO_SESSION" = "lonko-tray" ]; then
+    debug_log "lonko-parked"
+    exit 0
+fi
+
 CURRENT_WIN=$(tmux display-message -p '#{window_id}')
 LONKO_WIN=$(tmux list-panes -aF "#{pane_id} #{window_id}" \
     | awk -v p="$LONKO_PANE" '$1==p {print $2}' | head -1)
