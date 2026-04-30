@@ -1,3 +1,11 @@
+## v0.22.3 (2026-04-30)
+
+### Refactor
+
+- **state**: group modal-feature fields into sub-structs
+- **app**: extract panel and navigate modules from app.rs
+- **app**: extract remote-tailnet plumbing to app/remote.rs
+
 ## v0.22.2 (2026-04-30)
 
 ### Fix
