@@ -1,3 +1,9 @@
+## v0.22.0 (2026-04-30)
+
+### Feat
+
+- **panel**: adopt stationary-sidebar model with attention auto-show
+
 ## v0.21.3 (2026-04-29)
 
 ### Fix
