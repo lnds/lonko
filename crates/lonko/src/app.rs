@@ -1024,7 +1024,18 @@ impl App {
         if let Some(own) = self.state.own_pane.as_deref()
             && !tmux::window_has_lonko_pane(&target_win)
         {
+            // The follow script must NOT re-run after we move lonko: it
+            // would join-pane a second time, and on the topmost agent
+            // (whose window has no prior lonko-saved layout) tmux would
+            // pick a default width and shrink the panel. Both
+            // `client-session-changed` and `after-select-window` hooks
+            // fire from the `focus_pane` switch-client below; the
+            // single-shot sentinel was being consumed by the first hook
+            // and missed by the second. Refresh it across ~200 ms so
+            // both hooks see it. Same pattern `attach_remote_agent`
+            // uses for the same reason.
             write_no_follow_sentinel();
+            refresh_no_follow_sentinel_async();
             // Preserve the user's manually-resized sidebar width across
             // the move. Pass the absolute column count to `-l <cols>`
             // — a percentage round-trip truncates, shrinking the panel
