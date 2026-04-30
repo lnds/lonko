@@ -81,28 +81,6 @@ pub fn select_last_pane() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Current width of `pane_id` in columns. Used by `focus_local_agent_pane`
-/// to preserve the user's manually-resized lonko sidebar across window
-/// switches by passing the value to `tmux join-pane -l <cols>` directly.
-/// An earlier percentage-based approach lost a column or two each move
-/// to integer truncation (e.g. 60 cols → 24% → 57 cols → 23% → 55 cols),
-/// shrinking the panel monotonically with every click.
-pub fn pane_width(pane_id: &str) -> Option<u32> {
-    display_message_u32(&["-t", pane_id, "-p", "#{pane_width}"])
-}
-
-fn display_message_u32(extra_args: &[&str]) -> Option<u32> {
-    let mut args = vec!["display-message"];
-    args.extend(extra_args);
-    let output = Command::new("tmux")
-        .args(&args)
-        .output()
-        .ok()?;
-    if !output.status.success() { return None; }
-    let s = String::from_utf8(output.stdout).ok()?;
-    s.trim().parse::<u32>().ok()
-}
-
 /// Return the pane ID currently active in the main tmux client.
 pub fn active_pane() -> Option<String> {
     let client = find_main_client()?;

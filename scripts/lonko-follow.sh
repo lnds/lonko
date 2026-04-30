@@ -115,26 +115,22 @@ tmux display-message -p '#{pane_id}' > "$HOME/.cache/lonko-focus-pane"
 CURRENT_LAYOUT_FILE="$LAYOUT_DIR/${CURRENT_WIN}.layout"
 tmux display-message -t "$CURRENT_WIN" -p '#{window_layout}' > "$CURRENT_LAYOUT_FILE"
 
-# Preserve the user's manually-resized sidebar width across the move.
-# A hardcoded 25% snaps lonko back to default on every window switch
-# even if the user had widened or narrowed it. Pass the absolute column
-# count to `tmux join-pane -l <cols>`; using a percentage truncates
-# integer division and shrinks the panel by a column or two each move
-# (60 cols → 24% → 57 → 23% → 55 → ...).
-LONKO_WIDTH=$(tmux display-message -t "$LONKO_PANE" -p '#{pane_width}' 2>/dev/null)
-WIDTH_SPEC="25%"
-if [ -n "$LONKO_WIDTH" ] && [ "$LONKO_WIDTH" -gt 0 ]; then
-    WIDTH_SPEC="$LONKO_WIDTH"
-fi
-
-# Move the lonko pane to the current window. Full-height column on the
-# right; `-d` keeps focus on the user's working pane.
+# Move the lonko pane to the current window. Full-height column on
+# the right at 25%; `-d` keeps focus on the user's working pane.
+#
+# Width is fixed at 25%. Reading the live `pane_width` and round-
+# tripping it through `-l` was unstable: percentages truncated and
+# shrank the panel each move, and absolute column counts got
+# auto-balanced after the join depending on the destination window's
+# layout — so the panel grew or shrank unpredictably as the user
+# switched between agents. True width preservation needs a persisted
+# user preference, not a derived runtime value; revisit later.
 #
 # Using join-pane (not kill + split-window) is the whole point of this
 # design: the lonko process stays alive, so its agents list and remote
 # bridges survive intact. The source window reflows to whatever tmux
 # chooses; restoring a saved layout there gets the previous shape back.
-tmux join-pane -d -h -f -l "$WIDTH_SPEC" -s "$LONKO_PANE" -t "$CURRENT_WIN" 2>/dev/null
+tmux join-pane -d -h -f -l 25% -s "$LONKO_PANE" -t "$CURRENT_WIN" 2>/dev/null
 
 # Restore the previous window's layout to what it was BEFORE lonko lived
 # there (undoes the distortion the original split introduced).

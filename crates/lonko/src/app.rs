@@ -1024,27 +1024,25 @@ impl App {
         if let Some(own) = self.state.own_pane.as_deref()
             && !tmux::window_has_lonko_pane(&target_win)
         {
-            // The follow script must NOT re-run after we move lonko: it
-            // would join-pane a second time, and on the topmost agent
-            // (whose window has no prior lonko-saved layout) tmux would
-            // pick a default width and shrink the panel. Both
-            // `client-session-changed` and `after-select-window` hooks
-            // fire from the `focus_pane` switch-client below; the
-            // single-shot sentinel was being consumed by the first hook
-            // and missed by the second. Refresh it across ~200 ms so
-            // both hooks see it. Same pattern `attach_remote_agent`
-            // uses for the same reason.
+            // Suppress the follow script for the duration of the move:
+            // the `focus_pane` switch-client below fires both
+            // `client-session-changed` and `after-select-window`, and
+            // the sentinel is consumed by the first one — refresh
+            // across ~200 ms so the second hook sees a fresh file too.
+            // Same pattern `attach_remote_agent` uses for the same race.
             write_no_follow_sentinel();
             refresh_no_follow_sentinel_async();
-            // Preserve the user's manually-resized sidebar width across
-            // the move. Pass the absolute column count to `-l <cols>`
-            // — a percentage round-trip truncates, shrinking the panel
-            // by a column or two on every double-click. Falls back to
-            // `25%` only when tmux can't tell us the current width.
-            let spec = tmux::pane_width(own)
-                .map(|cols| cols.to_string())
-                .unwrap_or_else(|| "25%".to_string());
-            let _ = tmux::join_pane_right(own, &target_win, &spec);
+            // Width is fixed at 25% on every move. Earlier attempts to
+            // preserve the user's manually-resized width by reading
+            // `pane_width(own)` and passing it to `-l <cols>` ended up
+            // fighting tmux's layout balancing: percentages truncated
+            // monotonically (60 → 24% → 57 → ...), and absolute columns
+            // got auto-balanced after the join in some destination
+            // window layouts, so successive moves either shrank or
+            // grew the panel unpredictably. A fixed 25% is consistent.
+            // When we want true preservation it needs a persisted
+            // user-preference distinct from the live pane width.
+            let _ = tmux::join_pane_right(own, &target_win, "25%");
         }
 
         let _ = tmux::select_pane(pane);
