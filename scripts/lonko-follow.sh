@@ -115,22 +115,33 @@ tmux display-message -p '#{pane_id}' > "$HOME/.cache/lonko-focus-pane"
 CURRENT_LAYOUT_FILE="$LAYOUT_DIR/${CURRENT_WIN}.layout"
 tmux display-message -t "$CURRENT_WIN" -p '#{window_layout}' > "$CURRENT_LAYOUT_FILE"
 
-# Move the lonko pane to the current window. Full-height column on
-# the right at 25%; `-d` keeps focus on the user's working pane.
+# Use the user's persisted sidebar width preference (written by lonko
+# every few ticks when the panel is stable). The value is an absolute
+# column count clamped to [20, 200] on the writer side. Falls back to
+# 25% when the file is missing (first run, never resized).
 #
-# Width is fixed at 25%. Reading the live `pane_width` and round-
-# tripping it through `-l` was unstable: percentages truncated and
-# shrank the panel each move, and absolute column counts got
-# auto-balanced after the join depending on the destination window's
-# layout — so the panel grew or shrank unpredictably as the user
-# switched between agents. True width preservation needs a persisted
-# user preference, not a derived runtime value; revisit later.
+# Reading the live `pane_width` here was tried and was unstable: the
+# value drifts due to layout auto-balancing in some destination window
+# configurations, and percentages also truncated monotonically. A
+# persisted preference, only updated when the panel is NOT moving,
+# avoids both classes of regression.
+PREF_WIDTH_FILE="$HOME/.cache/lonko-width.col"
+WIDTH_SPEC="25%"
+if [ -f "$PREF_WIDTH_FILE" ]; then
+    pref=$(cat "$PREF_WIDTH_FILE" 2>/dev/null)
+    if [ -n "$pref" ] && [ "$pref" -gt 0 ]; then
+        WIDTH_SPEC="$pref"
+    fi
+fi
+
+# Move the lonko pane to the current window. Full-height column on
+# the right; `-d` keeps focus on the user's working pane.
 #
 # Using join-pane (not kill + split-window) is the whole point of this
 # design: the lonko process stays alive, so its agents list and remote
 # bridges survive intact. The source window reflows to whatever tmux
 # chooses; restoring a saved layout there gets the previous shape back.
-tmux join-pane -d -h -f -l 25% -s "$LONKO_PANE" -t "$CURRENT_WIN" 2>/dev/null
+tmux join-pane -d -h -f -l "$WIDTH_SPEC" -s "$LONKO_PANE" -t "$CURRENT_WIN" 2>/dev/null
 
 # Restore the previous window's layout to what it was BEFORE lonko lived
 # there (undoes the distortion the original split introduced).

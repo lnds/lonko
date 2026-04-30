@@ -19,6 +19,28 @@ use crate::{
 // ── Pure helpers (testable without App) ────────────────────────────────────────
 
 /// Write the no-follow sentinel so lonko-follow.sh skips the next hook trigger.
+/// Path of the persisted user-preferred sidebar width. Both the Rust
+/// process and `lonko-follow.sh` read this file so the panel keeps
+/// the user's chosen width across every move.
+fn preferred_width_path() -> std::path::PathBuf {
+    crate::state::lonko_cache_dir().join("lonko-width.col")
+}
+
+fn load_preferred_width() -> Option<u32> {
+    let path = preferred_width_path();
+    let content = std::fs::read_to_string(&path).ok()?;
+    let cols: u32 = content.trim().parse().ok()?;
+    if (20..=200).contains(&cols) { Some(cols) } else { None }
+}
+
+fn save_preferred_width(cols: u32) -> std::io::Result<()> {
+    let path = preferred_width_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, cols.to_string())
+}
+
 pub fn write_no_follow_sentinel() {
     let sentinel = crate::state::lonko_cache_dir().join("lonko-no-follow");
     // Ensure the cache dir exists — on a fresh install it may not,
@@ -283,6 +305,19 @@ pub struct App {
     /// Set this to `now + 500ms` at the start of every move op; the
     /// alone-detection short-circuits while it is in the future.
     panel_moving_until: Option<std::time::Instant>,
+    /// Timestamp of the most recent `mark_panel_moving` call. The
+    /// preferred-width tracker uses this to skip its periodic poll
+    /// for a few seconds after a move, so post-join layout transients
+    /// (auto-balance from named layouts, brief `pane_width` drift) do
+    /// not pollute the user's manually-set preference.
+    last_move_at: Option<std::time::Instant>,
+    /// User's preferred lonko sidebar width in columns, persisted to
+    /// `~/.cache/lonko-width.col`. Captured by a periodic poll of
+    /// `pane_width(own_pane)` when no move is in flight, so manual
+    /// resizes (tmux mouse drag, prefix-Ctrl-arrow) propagate to all
+    /// subsequent `tmux join-pane -l <cols>` calls. Falls back to
+    /// `"25%"` when None (first run).
+    preferred_width_cols: Option<u32>,
 }
 
 impl App {
@@ -310,15 +345,41 @@ impl App {
             remote_bridge_starting: std::collections::HashSet::new(),
             remote_online_hosts: std::collections::HashSet::new(),
             panel_moving_until: None,
+            last_move_at: None,
+            preferred_width_cols: load_preferred_width(),
         }
     }
 
     /// Mark the panel as currently moving between tmux windows/sessions.
     /// `should_self_quit_when_alone` returns false until the deadline expires.
+    /// `last_move_at` is also stamped so the preferred-width tracker
+    /// skips its poll until post-move layout transients have settled.
     fn mark_panel_moving(&mut self) {
-        self.panel_moving_until = Some(
-            std::time::Instant::now() + std::time::Duration::from_millis(500)
-        );
+        let now = std::time::Instant::now();
+        self.panel_moving_until = Some(now + std::time::Duration::from_millis(500));
+        self.last_move_at = Some(now);
+    }
+
+    /// Periodic poll: when the panel hasn't moved for a few seconds,
+    /// query the live `pane_width` and treat any change as the user
+    /// having manually resized the sidebar. Update the in-memory cache
+    /// AND persist to disk so `lonko-follow.sh` (a separate process)
+    /// uses the same value on its next join.
+    ///
+    /// Bounded to [20, 200] cols: a malformed query or some weird
+    /// fullscreen edge case shouldn't be able to set a degenerate
+    /// preference that would break future joins.
+    fn refresh_preferred_width(&mut self) {
+        let stable = self.last_move_at
+            .map(|t| t.elapsed() > std::time::Duration::from_secs(5))
+            .unwrap_or(true);
+        if !stable { return; }
+        let Some(own) = self.state.own_pane.as_deref() else { return };
+        let Some(cols) = tmux::pane_width(own) else { return };
+        if !(20..=200).contains(&cols) { return; }
+        if self.preferred_width_cols == Some(cols) { return; }
+        self.preferred_width_cols = Some(cols);
+        let _ = save_preferred_width(cols);
     }
 
     /// Schedule a transcript read + git_branch lookup off the event loop.
@@ -1032,17 +1093,17 @@ impl App {
             // Same pattern `attach_remote_agent` uses for the same race.
             write_no_follow_sentinel();
             refresh_no_follow_sentinel_async();
-            // Width is fixed at 25% on every move. Earlier attempts to
-            // preserve the user's manually-resized width by reading
-            // `pane_width(own)` and passing it to `-l <cols>` ended up
-            // fighting tmux's layout balancing: percentages truncated
-            // monotonically (60 → 24% → 57 → ...), and absolute columns
-            // got auto-balanced after the join in some destination
-            // window layouts, so successive moves either shrank or
-            // grew the panel unpredictably. A fixed 25% is consistent.
-            // When we want true preservation it needs a persisted
-            // user-preference distinct from the live pane width.
-            let _ = tmux::join_pane_right(own, &target_win, "25%");
+            // Use the persisted user-preferred width so the panel
+            // keeps the size the user has chosen across every move.
+            // The preference is captured by `refresh_preferred_width`
+            // running on a periodic tick when no move is in flight,
+            // so post-join layout transients never overwrite a
+            // deliberate resize. Falls back to `25%` when no
+            // preference has been recorded yet (first run).
+            let spec = self.preferred_width_cols
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "25%".to_string());
+            let _ = tmux::join_pane_right(own, &target_win, &spec);
         }
 
         let _ = tmux::select_pane(pane);
@@ -1424,6 +1485,12 @@ impl App {
 
     fn on_tick(&mut self) {
         self.state.tick = self.state.tick.wrapping_add(1);
+        // Capture user manual resizes of the sidebar every ~3 s. Skips
+        // until at least 5 s after the last move so post-join layout
+        // transients can't be mistaken for a deliberate resize.
+        if self.state.tick.is_multiple_of(30) {
+            self.refresh_preferred_width();
+        }
         // Poll the active tmux pane every ~1s to keep the focused session
         // current. The two-fork query (list-clients + display-message)
         // runs on `spawn_blocking` and lands as `Event::ActivePaneRefreshed`

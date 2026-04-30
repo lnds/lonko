@@ -81,6 +81,20 @@ pub fn select_last_pane() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Current width of `pane_id` in columns. Used by the panel-width
+/// preference tracker to detect when the user manually resizes lonko's
+/// pane, so the new value can be persisted and used by every subsequent
+/// `tmux join-pane` call.
+pub fn pane_width(pane_id: &str) -> Option<u32> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-t", pane_id, "-p", "#{pane_width}"])
+        .output()
+        .ok()?;
+    if !output.status.success() { return None; }
+    let s = String::from_utf8(output.stdout).ok()?;
+    s.trim().parse::<u32>().ok()
+}
+
 /// Return the pane ID currently active in the main tmux client.
 pub fn active_pane() -> Option<String> {
     let client = find_main_client()?;
