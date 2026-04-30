@@ -16,6 +16,8 @@ use crate::{
     ui,
 };
 
+mod navigate;
+mod panel;
 mod remote;
 pub use remote::attach_remote_agent;
 
@@ -216,14 +218,6 @@ impl App {
             remote_online_hosts: std::collections::HashSet::new(),
             panel_moving_until: None,
         }
-    }
-
-    /// Mark the panel as currently moving between tmux windows/sessions.
-    /// `should_self_quit_when_alone` returns false until the deadline expires.
-    fn mark_panel_moving(&mut self) {
-        self.panel_moving_until = Some(
-            std::time::Instant::now() + std::time::Duration::from_millis(500)
-        );
     }
 
     /// Schedule a transcript read + git_branch lookup off the event loop.
@@ -639,24 +633,6 @@ impl App {
         }
     }
 
-    /// Focus the selected tmux session (Sessions tab), optionally at a specific window.
-    fn focus_tmux_session(&mut self) {
-        let Some(session) = self.state.selected_tmux_session() else { return };
-        let name = session.name.clone();
-        if let Some(win_idx) = self.state.tmux_window_cursor
-            && let Some(window) = session.windows.get(win_idx) {
-                let _ = tmux::focus_session_window(&name, window.index);
-                return;
-            }
-        let mut cmd = std::process::Command::new("tmux");
-        cmd.arg("switch-client");
-        if let Some(client) = tmux::find_main_client() {
-            cmd.args(["-c", &client]);
-        }
-        cmd.args(["-t", &name]).stderr(std::process::Stdio::null());
-        let _ = cmd.status();
-    }
-
     /// Toggle exclusion of the host under the cursor in the Remote tab.
     /// Excluded hosts are removed from the list and skipped during polling.
     fn toggle_exclude_remote_host(&mut self) {
@@ -680,245 +656,6 @@ impl App {
         crate::config::save_excluded_hosts(&self.state.excluded_hosts);
     }
 
-
-    /// Returns true when lonko is the only pane left in its current tmux session,
-    /// so it should exit cleanly instead of lingering as a solitary pane/window.
-    /// Skips lonko-internal sessions (lonko-tray, floating-*) where lonko is meant
-    /// to keep running in the background.
-    fn should_self_quit_when_alone(&self) -> bool {
-        // Suppress while a panel move is in flight: between break-pane
-        // and join-pane, lonko can transiently appear alone in a
-        // session-of-one and the unguarded check would hide the panel
-        // mid-switch.
-        if self.panel_moving_until.is_some_and(|t| t > std::time::Instant::now()) {
-            return false;
-        }
-        let Some(own) = self.state.own_pane.as_deref() else { return false };
-        let Some(session) = tmux::tmux_session_for_pane(own) else { return false };
-        // `remote/*` is now treated the same as the lonko-internal
-        // sessions: if super+s pulled the local panel into a remote
-        // wrapper window and the SSH attach pane later dies, lonko
-        // would be left alone in `remote/<host>` and auto-hide would
-        // fire while the user only briefly switched away. The user
-        // can re-summon explicitly; we don't want to disappear out
-        // from under them.
-        if session == "lonko-tray"
-            || session.starts_with("floating-")
-            || session.starts_with("remote/")
-        {
-            return false;
-        }
-        let panes = tmux::list_pane_ids_in_session(&session);
-        // Require a non-empty result: `list_pane_ids_in_session` also returns an
-        // empty vec when the tmux subprocess fails transiently (server restart,
-        // IO error), and we don't want that to self-quit. The genuinely-gone case
-        // is already covered by `tmux_session_for_pane` returning None above.
-        let alone = !panes.is_empty() && panes.iter().all(|p| p == own);
-        if alone {
-            tracing::debug!(
-                "alone-detected: own={own} session={session} panes={:?}",
-                panes
-            );
-        }
-        alone
-    }
-
-    /// Hide the panel by moving it back to lonko-tray (lonko keeps running).
-    /// No-op when lonko is already in `lonko-tray` so callers can invoke
-    /// this unconditionally after a `switch-client`.
-    fn hide_panel(&self) {
-        let Some(ref own) = self.state.own_pane else { return };
-        if tmux::tmux_session_for_pane(own).as_deref() == Some("lonko-tray") {
-            return;
-        }
-
-        // Capture the window id before break-pane so we can restore its layout.
-        let win_id = std::process::Command::new("tmux")
-            .args(["display-message", "-t", own, "-p", "#{window_id}"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-
-        // Ensure lonko-tray exists. We bootstrap with a non-shell
-        // placeholder pane (`tail -f /dev/null`) instead of letting
-        // tmux fork a default zsh: a backgrounded shell would linger
-        // in lonko-tray after lonko's pane is broken in alongside it,
-        // and survive every subsequent break/join cycle. Worse, when
-        // the user later closes lonko (Ctrl-C), the orphan shell can
-        // be the one that ends up promoted to the visible pane via
-        // tmux's own pane bookkeeping. Capture the placeholder's pane
-        // id and kill it immediately after lonko's pane lands inside,
-        // so lonko-tray ends up with exactly one pane: lonko itself.
-        let tray_exists = std::process::Command::new("tmux")
-            .args(["has-session", "-t", "lonko-tray"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        let mut placeholder_pane: Option<String> = None;
-        if !tray_exists {
-            let out = std::process::Command::new("tmux")
-                .args([
-                    "new-session", "-d", "-s", "lonko-tray",
-                    "-P", "-F", "#{pane_id}",
-                    "tail", "-f", "/dev/null",
-                ])
-                .stderr(std::process::Stdio::null())
-                .output()
-                .ok();
-            placeholder_pane = out
-                .filter(|o| o.status.success())
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-        }
-
-        let _ = std::process::Command::new("tmux")
-            .args(["break-pane", "-d", "-s", own, "-t", "lonko-tray:"])
-            .stderr(std::process::Stdio::null())
-            .status();
-
-        // Drop the bootstrap placeholder now that lonko's pane is in
-        // residence. Last-pane semantics on tmux would destroy the
-        // session if we killed the placeholder before break-pane, so
-        // ordering matters here.
-        if let Some(ph) = placeholder_pane {
-            let _ = std::process::Command::new("tmux")
-                .args(["kill-pane", "-t", &ph])
-                .stderr(std::process::Stdio::null())
-                .status();
-        }
-
-        // Restore the window's saved layout (undoes the distortion that happened
-        // when lonko was added to this window). Drops the layout file on success.
-        if let Some(win) = win_id {
-            let home = std::env::var("HOME").unwrap_or_default();
-            let layout_path = format!("{home}/.cache/lonko-layouts/{win}.layout");
-            if let Ok(layout) = std::fs::read_to_string(&layout_path) {
-                let layout = layout.trim();
-                if !layout.is_empty() {
-                    let _ = std::process::Command::new("tmux")
-                        .args(["select-layout", "-t", &win, layout])
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                }
-                let _ = std::fs::remove_file(&layout_path);
-            }
-        }
-    }
-
-    fn focus_selected(&mut self) {
-        // Pull every value out of the borrow up front so we can call
-        // `&mut self` helpers (mark_panel_moving, focus_local_agent_pane)
-        // without fighting the borrow checker.
-        let (host, stored_pane, pid, session_id) = {
-            let Some(session) = self.state.selected_session() else { return };
-            (
-                session.host.clone(),
-                session.tmux_pane.clone(),
-                session.pid,
-                session.id.clone(),
-            )
-        };
-
-        // Remote agent: open a new tmux window that SSH-attaches to the
-        // remote tmux session containing this pane. Falls back to a no-op
-        // when we don't yet know the pane (hook hasn't landed).
-        if let Some(host) = host {
-            if let Some(pane) = stored_pane {
-                self.mark_panel_moving();
-                attach_remote_agent(&host, &pane);
-            }
-            return;
-        }
-
-        // Use stored pane or discover it by walking the process tree
-        let pane = stored_pane.or_else(|| tmux::find_pane_for_pid(pid));
-
-        if let Some(ref pane) = pane {
-            tracing::debug!("focus_selected: pane={pane} pid={pid}");
-            // Cache the discovered pane
-            if let Some(s) = self.state.sessions.iter_mut().find(|s| s.id == session_id) {
-                s.tmux_pane = Some(pane.clone());
-            }
-            self.focus_local_agent_pane(pane);
-            self.state.focused_session_id = Some(session_id);
-        } else {
-            tracing::warn!("focus_selected: no pane found for pid={pid}, using select_last_pane");
-            let _ = tmux::select_last_pane();
-        }
-    }
-
-    /// Switch the user's client to the agent's window and hide lonko
-    /// back into `lonko-tray`. The previous design pre-moved lonko's
-    /// own pane into the target window via `join-pane` BEFORE the
-    /// `switch-client`, so the sidebar would already be in place when
-    /// the user arrived. That added a constant tax of bugs in
-    /// multi-client setups: `tmux join-pane -l N%` computes the
-    /// percentage on the destination's CURRENT width, but
-    /// `window-size = latest` rescales the window AFTER the
-    /// switch-client to the active client's size. The size lonko
-    /// requested no longer corresponded to what the user saw, and
-    /// every approach to fix it (cols, percent, persisted preference,
-    /// half-up rounding, threshold) opened a new edge case.
-    ///
-    /// Now: lonko is stationary in `lonko-tray`. On agent navigation
-    /// we just switch the client and hide the panel. The user can
-    /// re-summon lonko with `super+s` when they need it. Permission
-    /// prompts auto-show lonko (see `auto_show_panel`) so attention-
-    /// urgent agents aren't lost just because the sidebar is hidden.
-    fn focus_local_agent_pane(&mut self, pane: &str) {
-        let _ = tmux::select_pane(pane);
-        let _ = tmux::focus_pane(pane);
-        self.hide_panel();
-    }
-
-    /// Auto-show lonko alongside the user's current window. Used when
-    /// an agent transitions to `WaitingForUser` so the user gets an
-    /// inline permission prompt without having to invoke the panel by
-    /// hand.
-    ///
-    /// No-op when lonko is already visible (not in `lonko-tray`), when
-    /// the user's window already has a lonko pane (e.g. an SSH attach
-    /// to a remote whose tmux carries its own sidebar), or when
-    /// lonko's pane id can't be resolved (cold start).
-    ///
-    /// Joins with `-d` so the user keeps focus on their working pane;
-    /// `cmd+shift+y/n/w` answers the prompt without grabbing the cursor.
-    fn auto_show_panel(&self) {
-        let Some(own) = self.state.own_pane.as_deref() else { return };
-        let Some(session) = tmux::tmux_session_for_pane(own) else { return };
-        if session != "lonko-tray" { return; }
-        let Some(client) = tmux::find_main_client() else { return };
-        // Pull both the window AND the session of the user's current
-        // view in a single display-message so we can guard against
-        // wrapper / popup destinations the same way `lonko-follow.sh`
-        // does. The split-on-NUL is intentional: session names can
-        // contain `/` (e.g. `remote/<host>`).
-        let cur = std::process::Command::new("tmux")
-            .args(["display-message", "-c", &client, "-p", "#{window_id}\x1f#{session_name}"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        let Some(cur) = cur else { return };
-        let mut parts = cur.splitn(2, '\x1f');
-        let Some(cur_win) = parts.next().filter(|s| !s.is_empty()) else { return };
-        let cur_session = parts.next().unwrap_or("");
-        // Skip when the user is inside an SSH-attach to a remote tmux
-        // (`remote/<host>`) that already carries its own lonko, and
-        // skip floating popups where lonko has no business stacking
-        // a sidebar on top of a transient view.
-        if cur_session.starts_with("remote/") || cur_session.starts_with("floating-") {
-            return;
-        }
-        if tmux::window_has_lonko_pane(cur_win) { return; }
-        let _ = tmux::join_pane_right(own, cur_win, "25%");
-    }
 
     fn refresh_selected_transcript(&self) {
         // Index via the visible list (matches `selected_session()`); the
