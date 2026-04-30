@@ -1,3 +1,9 @@
+## v0.21.3 (2026-04-29)
+
+### Fix
+
+- **panel**: don't capture preferred width while lonko is parked
+
 ## v0.21.2 (2026-04-29)
 
 ### Fix
