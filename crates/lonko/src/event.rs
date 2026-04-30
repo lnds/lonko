@@ -30,6 +30,15 @@ pub enum Event {
     /// off the main thread. Pane ID may be `None` when tmux is between
     /// states (server restart, no clients attached).
     ActivePaneRefreshed(Option<String>),
+    /// Deferred result of a `transcript::read_latest` + `git_branch`
+    /// pair, computed on `spawn_blocking`. Used by the Stop hook
+    /// handler and the detail-view navigation refresh so the JSONL
+    /// parse and the `git rev-parse` fork don't block the event loop.
+    TranscriptInfoLoaded {
+        session_id: String,
+        info: Option<crate::sources::transcript::TranscriptInfo>,
+        branch: Option<String>,
+    },
     /// A snapshot of tmux sessions from a remote Tailnet host
     RemoteSnapshot(crate::sources::remote_tmux::RemoteSnapshot),
     /// The set of hostnames that were online during the latest Tailnet poll.

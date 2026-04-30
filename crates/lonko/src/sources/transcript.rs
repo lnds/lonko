@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::agents::claude;
 
+#[derive(Debug)]
 pub struct TranscriptInfo {
     pub model: Option<String>,
     pub branch: Option<String>,

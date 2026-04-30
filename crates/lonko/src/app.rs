@@ -73,27 +73,14 @@ pub fn hook_event_to_status(
         }
         "PostToolUse" => Some(SessionStatus::Running),
         "Stop" | "SubagentStop" => {
-            let path = session.transcript_path.clone()
-                .map(std::path::PathBuf::from)
-                .or_else(|| Some(transcript::transcript_path(&session.cwd, &session.id)));
-            // Set the new status BEFORE applying transcript info so
-            // `apply_transcript_info`'s `!is_active()` guard accepts
-            // the freshly-written `last_prompt` instead of dropping it.
-            // Without this, the guard sees the old (Running/RunningTool)
-            // status and silently discards the transcript's prompt,
-            // leaving the card showing the previous turn's prompt.
-            // The caller writes the same Idle when applying our return
-            // value; the double-write is intentional and harmless.
-            session.status = SessionStatus::Idle;
-            if let Some(path) = path {
-                if let Some(mut info) = transcript::read_latest(&path) {
-                    info.branch = transcript::git_branch(&session.cwd).or(info.branch);
-                    session.apply_transcript_info(info);
-                } else {
-                    let live = transcript::git_branch(&session.cwd);
-                    if live.is_some() { session.branch = live; }
-                }
-            }
+            // Status flips to Idle synchronously so the UI updates without
+            // waiting on the (potentially expensive) transcript parse and
+            // git_branch fork. The caller (`handle_hook`) sees the Stop
+            // event, schedules `spawn_transcript_load`, and the
+            // `TranscriptInfoLoaded` handler writes the model / cost /
+            // last_prompt / branch a few ms later — by which time
+            // session.status is already Idle, so `apply_transcript_info`'s
+            // `!is_active()` guard correctly accepts the fresh prompt.
             Some(SessionStatus::Idle)
         }
         "SessionEnd" => {
@@ -332,6 +319,29 @@ impl App {
         self.panel_moving_until = Some(
             std::time::Instant::now() + std::time::Duration::from_millis(500)
         );
+    }
+
+    /// Schedule a transcript read + git_branch lookup off the event loop.
+    /// Result lands as `Event::TranscriptInfoLoaded` and is applied via
+    /// the main task. The blocking parse can take tens of milliseconds
+    /// for a large JSONL plus the `git rev-parse` fork — running it
+    /// inline (as the Stop hook used to) would stall the render loop
+    /// every time an agent finished.
+    fn spawn_transcript_load(
+        &self,
+        session_id: String,
+        path: std::path::PathBuf,
+        cwd: String,
+    ) {
+        let Some(ref tx) = self.scan_tx else { return };
+        let tx = tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let info = transcript::read_latest(&path);
+            let branch = transcript::git_branch(&cwd);
+            if info.is_some() || branch.is_some() {
+                let _ = tx.send(Event::TranscriptInfoLoaded { session_id, info, branch });
+            }
+        });
     }
 
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
@@ -1026,17 +1036,20 @@ impl App {
         let _ = tmux::focus_pane(pane);
     }
 
-    fn refresh_selected_transcript(&mut self) {
-        let selected = self.state.selected;
-        let Some(session) = self.state.sessions.get(selected) else { return };
+    fn refresh_selected_transcript(&self) {
+        // Index via the visible list (matches `selected_session()`); the
+        // raw `self.state.sessions[self.state.selected]` lookup that this
+        // used to do drifted to the wrong session whenever group sorting
+        // reordered the list.
+        let Some(session) = self.state.selected_session() else { return };
+        let session_id = session.id.clone();
         let cwd = session.cwd.clone();
         let path = session.transcript_path.clone()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| transcript::transcript_path(&session.cwd, &session.id));
-        let Some(mut info) = transcript::read_latest(&path) else { return };
-        // Prefer live git branch over stale transcript value
-        info.branch = transcript::git_branch(&cwd).or(info.branch);
-        self.state.sessions[selected].apply_transcript_info(info);
+        // Off the event loop: the JSONL parse and `git rev-parse` fork
+        // were the leading source of per-keystroke lag in the detail view.
+        self.spawn_transcript_load(session_id, path, cwd);
     }
 
     /// Send a permission response to the first session waiting for user approval.
@@ -1225,6 +1238,22 @@ impl App {
         if !ghostty::has_focus() {
             notify_if_needed(session.display_name(), &session.status);
         }
+
+        // Defer the transcript parse + git_branch fork off the event loop
+        // for any Stop-style hook. Status update is already done above;
+        // the deferred result lands as `TranscriptInfoLoaded` and refines
+        // model / cost / last_prompt / branch on the same session.
+        if matches!(event_name, "Stop" | "SubagentStop") {
+            let session_id = session.id.clone();
+            let cwd = session.cwd.clone();
+            let path = session.transcript_path.clone()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| transcript::transcript_path(&session.cwd, &session.id));
+            // `session`'s last use is the line above; NLL drops the
+            // mutable borrow on `self.state.sessions` here, freeing
+            // self for the &self call below.
+            self.spawn_transcript_load(session_id, path, cwd);
+        }
     }
 
     fn handle_event(&mut self, event: Event) -> Result<bool> {
@@ -1300,6 +1329,22 @@ impl App {
                             .find(|s| s.tmux_pane.as_deref() == Some(active.as_str()))
                             .map(|s| s.id.clone());
                         self.state.focused_session_id = focused_id;
+                    }
+                }
+            }
+            Event::TranscriptInfoLoaded { session_id, info, branch } => {
+                if let Some(s) = self.state.sessions.iter_mut().find(|s| s.id == session_id) {
+                    if let Some(mut info) = info {
+                        // Live git_branch wins over the (possibly stale) one
+                        // baked into the transcript, matching the previous
+                        // synchronous behavior.
+                        if branch.is_some() { info.branch = branch; }
+                        s.apply_transcript_info(info);
+                    } else if let Some(branch) = branch {
+                        // Transcript was unreadable but we still have a
+                        // fresh branch — same fallback the old sync path
+                        // used to do.
+                        s.branch = Some(branch);
                     }
                 }
             }
