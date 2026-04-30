@@ -1026,10 +1026,14 @@ impl App {
         {
             write_no_follow_sentinel();
             // Preserve the user's manually-resized sidebar width across
-            // the move. Falling back to 25% only when tmux can't tell
-            // us the current dimensions (cold path).
-            let pct = tmux::pane_width_pct(own).unwrap_or(25);
-            let _ = tmux::join_pane_right(own, &target_win, pct);
+            // the move. Pass the absolute column count to `-l <cols>`
+            // — a percentage round-trip truncates, shrinking the panel
+            // by a column or two on every double-click. Falls back to
+            // `25%` only when tmux can't tell us the current width.
+            let spec = tmux::pane_width(own)
+                .map(|cols| cols.to_string())
+                .unwrap_or_else(|| "25%".to_string());
+            let _ = tmux::join_pane_right(own, &target_win, &spec);
         }
 
         let _ = tmux::select_pane(pane);

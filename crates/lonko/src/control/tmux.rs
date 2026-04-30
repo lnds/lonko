@@ -81,17 +81,14 @@ pub fn select_last_pane() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Width of `pane_id` as a percentage of its window's total width, clamped
-/// to [10, 70]. Used by `focus_local_agent_pane` to preserve the user's
-/// manually-resized lonko sidebar across window switches: a hardcoded
-/// 25% would snap the panel back to default on every move. Returns
-/// `None` when tmux can't resolve either dimension.
-pub fn pane_width_pct(pane_id: &str) -> Option<u8> {
-    let pane_width = display_message_u32(&["-t", pane_id, "-p", "#{pane_width}"])?;
-    let win_width = display_message_u32(&["-t", pane_id, "-p", "#{window_width}"])?;
-    if win_width == 0 { return None; }
-    let pct = (pane_width.saturating_mul(100)) / win_width;
-    Some(pct.clamp(10, 70) as u8)
+/// Current width of `pane_id` in columns. Used by `focus_local_agent_pane`
+/// to preserve the user's manually-resized lonko sidebar across window
+/// switches by passing the value to `tmux join-pane -l <cols>` directly.
+/// An earlier percentage-based approach lost a column or two each move
+/// to integer truncation (e.g. 60 cols → 24% → 57 cols → 23% → 55 cols),
+/// shrinking the panel monotonically with every click.
+pub fn pane_width(pane_id: &str) -> Option<u32> {
+    display_message_u32(&["-t", pane_id, "-p", "#{pane_width}"])
 }
 
 fn display_message_u32(extra_args: &[&str]) -> Option<u32> {
@@ -409,16 +406,22 @@ pub fn tmux_window_for_pane(pane_id: &str) -> Option<String> {
 }
 
 /// Move an existing pane into a target window as a full-height right-hand
-/// column at the given percentage. `-d` leaves focus where it was so this
-/// doesn't steal the user's cursor. Mirrors what `lonko-follow.sh` does
-/// when the hook fires, but lets the caller trigger the move proactively.
-pub fn join_pane_right(src_pane: &str, target_window: &str, width_pct: u8) -> anyhow::Result<()> {
+/// column. `width_spec` is passed verbatim to `tmux join-pane -l` and may
+/// be either an absolute column count (e.g. `"60"`) or a percentage
+/// (e.g. `"25%"`). Absolute columns are preferred for "preserve user's
+/// width" because they round-trip cleanly; percentages truncate and lose
+/// columns on every move.
+///
+/// `-d` leaves focus where it was so the move doesn't steal the user's
+/// cursor. Mirrors what `lonko-follow.sh` does when the hook fires, but
+/// lets the caller trigger the move proactively.
+pub fn join_pane_right(src_pane: &str, target_window: &str, width_spec: &str) -> anyhow::Result<()> {
     let status = Command::new("tmux")
         .args([
             "join-pane",
             "-d",
             "-h", "-f",
-            "-l", &format!("{width_pct}%"),
+            "-l", width_spec,
             "-s", src_pane,
             "-t", target_window,
         ])

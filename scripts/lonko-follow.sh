@@ -117,18 +117,14 @@ tmux display-message -t "$CURRENT_WIN" -p '#{window_layout}' > "$CURRENT_LAYOUT_
 
 # Preserve the user's manually-resized sidebar width across the move.
 # A hardcoded 25% snaps lonko back to default on every window switch
-# even if the user had widened or narrowed it. Compute the percentage
-# against the source window's width — both source and destination
-# share the same client, so total columns are identical and the
-# percentage carries over cleanly. Bounded to [10, 70] so a malformed
-# response or extreme manual resize can't produce an unusable layout.
+# even if the user had widened or narrowed it. Pass the absolute column
+# count to `tmux join-pane -l <cols>`; using a percentage truncates
+# integer division and shrinks the panel by a column or two each move
+# (60 cols → 24% → 57 → 23% → 55 → ...).
 LONKO_WIDTH=$(tmux display-message -t "$LONKO_PANE" -p '#{pane_width}' 2>/dev/null)
-SRC_WIN_WIDTH=$(tmux display-message -t "$LONKO_WIN" -p '#{window_width}' 2>/dev/null)
-LONKO_PCT=25
-if [ -n "$LONKO_WIDTH" ] && [ -n "$SRC_WIN_WIDTH" ] && [ "$SRC_WIN_WIDTH" -gt 0 ]; then
-    LONKO_PCT=$(( LONKO_WIDTH * 100 / SRC_WIN_WIDTH ))
-    if [ "$LONKO_PCT" -lt 10 ]; then LONKO_PCT=10; fi
-    if [ "$LONKO_PCT" -gt 70 ]; then LONKO_PCT=70; fi
+WIDTH_SPEC="25%"
+if [ -n "$LONKO_WIDTH" ] && [ "$LONKO_WIDTH" -gt 0 ]; then
+    WIDTH_SPEC="$LONKO_WIDTH"
 fi
 
 # Move the lonko pane to the current window. Full-height column on the
@@ -138,7 +134,7 @@ fi
 # design: the lonko process stays alive, so its agents list and remote
 # bridges survive intact. The source window reflows to whatever tmux
 # chooses; restoring a saved layout there gets the previous shape back.
-tmux join-pane -d -h -f -l "${LONKO_PCT}%" -s "$LONKO_PANE" -t "$CURRENT_WIN" 2>/dev/null
+tmux join-pane -d -h -f -l "$WIDTH_SPEC" -s "$LONKO_PANE" -t "$CURRENT_WIN" 2>/dev/null
 
 # Restore the previous window's layout to what it was BEFORE lonko lived
 # there (undoes the distortion the original split introduced).
