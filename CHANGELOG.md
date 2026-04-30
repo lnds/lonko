@@ -1,3 +1,9 @@
+## v0.21.0 (2026-04-29)
+
+### Feat
+
+- **panel**: persist user-preferred sidebar width across moves
+
 ## v0.20.1 (2026-04-29)
 
 ### Fix
