@@ -1,3 +1,9 @@
+## v0.22.2 (2026-04-30)
+
+### Fix
+
+- **panel**: skip auto-show inside remote/<host> and floating-* sessions
+
 ## v0.22.1 (2026-04-30)
 
 ### Fix
