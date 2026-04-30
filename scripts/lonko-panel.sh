@@ -81,9 +81,20 @@ tmux display-message -t "$CURRENT_WIN" -p '#{window_layout}' \
 
 # Move the existing lonko pane to the current window. Preserves the
 # process (agents list + remote bridges survive) — same rationale as in
-# lonko-follow.sh. Full-height column on the right at 25%; `-d` keeps
-# focus on the user's working pane.
-tmux join-pane -d -h -f -l 25% -s "$TRAY_PANE" -t "$CURRENT_WIN" 2>/dev/null
+# lonko-follow.sh. Full-height column on the right at 25%.
+#
+# Note: NO `-d` here. The user invoked lonko explicitly (super+s /
+# super+a), so they're coming to operate it — switch agents, open a
+# PR, navigate. Joining without `-d` puts focus on lonko by default
+# in tmux, matching the user's intent. The auto-show path (when an
+# agent fires WaitingForUser) deliberately uses `-d` so it doesn't
+# steal focus from a working session.
+tmux join-pane -h -f -l 25% -s "$TRAY_PANE" -t "$CURRENT_WIN" 2>/dev/null
+
+# Belt-and-suspenders: explicitly select the lonko pane after the
+# join. tmux's exact focus semantics for `join-pane` without `-d`
+# can vary across versions and active-pane state of the destination.
+tmux select-pane -t "$TRAY_PANE" 2>/dev/null
 
 # If the user requested a specific tab, ask the running lonko to switch
 send_tab_key "$TRAY_PANE"
