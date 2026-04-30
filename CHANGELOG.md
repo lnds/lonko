@@ -1,3 +1,9 @@
+## v0.22.1 (2026-04-30)
+
+### Fix
+
+- **panel**: give focus to lonko on manual super+s/super+a invocation
+
 ## v0.22.0 (2026-04-30)
 
 ### Feat
