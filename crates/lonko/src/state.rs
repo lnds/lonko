@@ -1,7 +1,90 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::sources::transcript::TranscriptInfo;
+use crate::sources::hooks::HookPayload;
+use crate::sources::transcript::{self, TranscriptInfo};
+
+/// Map a hook event name to a `SessionStatus` update, mutating
+/// per-event session fields (last_prompt, last_tool, completed_at)
+/// along the way. Returns `None` for unknown events — the caller
+/// should leave the status unchanged.
+pub fn hook_event_to_status(
+    event_name: &str,
+    payload: &HookPayload,
+    session: &mut Session,
+) -> Option<SessionStatus> {
+    match event_name {
+        "SessionStart" => Some(SessionStatus::Idle),
+        "UserPromptSubmit" => {
+            if let Some(p) = &payload.prompt {
+                let text = p.trim();
+                // Skip `<<autonomous-loop-dynamic>>` and similar runtime
+                // sentinels — they're scheduled re-fires, not prompts the
+                // user just typed.
+                if !text.is_empty() && !transcript::is_system_injected(text) {
+                    session.last_prompt = Some(text.to_string());
+                }
+            }
+            Some(SessionStatus::Running)
+        }
+        "PreToolUse" => {
+            let tool = payload.tool_name.clone().unwrap_or_else(|| "?".into());
+            session.last_tool = Some(tool.clone());
+            Some(SessionStatus::RunningTool(tool))
+        }
+        "PostToolUse" => Some(SessionStatus::Running),
+        "Stop" | "SubagentStop" => {
+            // Status flips to Idle synchronously so the UI updates without
+            // waiting on the (potentially expensive) transcript parse and
+            // git_branch fork. The caller schedules a deferred transcript
+            // read; the late `apply_transcript_info` runs against the
+            // already-Idle session, so its `!is_active()` guard accepts
+            // the fresh prompt.
+            Some(SessionStatus::Idle)
+        }
+        "SessionEnd" => {
+            session.completed_at = Some(std::time::Instant::now());
+            Some(SessionStatus::Completed)
+        }
+        "Notification" => {
+            let msg = payload.message.clone().unwrap_or_default();
+            match payload.notification_type.as_deref() {
+                Some("permission_prompt") => Some(SessionStatus::WaitingForUser(msg)),
+                _ => Some(SessionStatus::WaitingForInput),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// What `App::handle_hook` needs to know after `AppState::apply_hook`
+/// has finished mutating state. Carries the values the orchestration
+/// layer (notifications, panel auto-show, deferred transcript load)
+/// needs from the now-mutated session, captured up front so the
+/// `&mut self` borrow on `AppState` can end before any `&self`
+/// follow-up calls.
+#[derive(Debug)]
+pub struct HookEffect {
+    /// Display name of the affected session (for desktop notifications).
+    pub display_name: String,
+    /// Status the session ended up in after applying the hook.
+    pub status: SessionStatus,
+    /// True when this hook transitioned the session into
+    /// `WaitingForUser`; used to decide whether to auto-show the panel.
+    pub is_now_waiting: bool,
+    /// Seed for the deferred `spawn_transcript_load` call. Set only on
+    /// `Stop`/`SubagentStop` hooks, where the transcript may have new
+    /// model/cost/last_prompt to surface.
+    pub transcript_seed: Option<TranscriptSeed>,
+}
+
+#[derive(Debug)]
+pub struct TranscriptSeed {
+    pub session_id: String,
+    pub path: PathBuf,
+    pub cwd: String,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionStatus {
@@ -1290,6 +1373,166 @@ impl AppState {
         } else {
             cur - 1
         });
+    }
+
+    /// Apply a hook payload to the state: resolve the session, mutate
+    /// its fields, compute the new status, and return a `HookEffect`
+    /// that carries the values `App::handle_hook` needs to orchestrate
+    /// notifications and the deferred transcript fetch.
+    ///
+    /// `live_branch` is computed by the caller (synchronous git fork)
+    /// and threaded through to `resolve_hook_session`. Keeping the
+    /// fork outside `state.rs` lets the state layer stay I/O-free
+    /// and unit-testable.
+    ///
+    /// Returns `None` when the payload is dropped (no session_id, or
+    /// subagent without an agent_id, or unknown event name) — the
+    /// caller should bail out of the rest of `handle_hook`.
+    pub fn apply_hook(
+        &mut self,
+        payload: &HookPayload,
+        live_branch: Option<String>,
+    ) -> Option<HookEffect> {
+        let parent_session_id = payload.session_id.as_deref().filter(|s| !s.is_empty())?;
+        let is_subagent = payload.agent_type.as_ref().is_some_and(|t| !t.is_empty());
+        let effective_id: String = if is_subagent {
+            let id = payload.agent_id.as_deref().filter(|s| !s.is_empty())?;
+            id.to_string()
+        } else {
+            parent_session_id.to_string()
+        };
+
+        let hook_pane = payload.tmux_pane.as_deref().filter(|p| !p.is_empty());
+        let hook_cwd = payload.cwd.as_deref().filter(|c| !c.is_empty());
+
+        if is_subagent {
+            // Create the subagent's session entry on first hook if it
+            // doesn't already exist. Inherits the parent's group key
+            // and depth so it clusters under the parent in the list.
+            if !self.sessions.iter().any(|s| s.id == effective_id) {
+                let cwd = hook_cwd.unwrap_or_default().to_string();
+                if cwd.is_empty() { return None; }
+                let parent_id_owned = parent_session_id.to_string();
+                let (parent_depth, parent_repo_root) = self.sessions.iter()
+                    .find(|s| s.id == parent_id_owned)
+                    .map(|s| (s.depth, s.repo_root.clone()))
+                    .unwrap_or((0, None));
+                let agent_type = payload.agent_type.as_deref().unwrap_or("sub");
+                let mut session = Session::new(effective_id.clone(), 0, cwd);
+                session.status = SessionStatus::Running;
+                session.parent_id = Some(parent_id_owned);
+                session.depth = (parent_depth + 1).min(2);
+                session.project_name = agent_type.to_string();
+                session.repo_root = parent_repo_root;
+                if let Some(pane) = hook_pane {
+                    session.tmux_pane = Some(pane.to_string());
+                }
+                if let Some(tp) = payload.agent_transcript_path.as_deref().filter(|t| !t.is_empty()) {
+                    session.transcript_path = Some(tp.to_string());
+                }
+                self.sessions.push(session);
+            }
+        } else {
+            if !self.resolve_hook_session(
+                &effective_id,
+                hook_pane,
+                hook_cwd,
+                payload.transcript_path.as_deref(),
+                live_branch,
+                payload.host.as_deref(),
+            ) {
+                return None;
+            }
+            // Fill in the group key for brand-new sessions; the cwd fallback
+            // ensures non-git sessions never re-trigger the shell call on
+            // subsequent hook events.
+            if let Some(s) = self.sessions.iter_mut().find(|s| s.id == effective_id)
+                && s.repo_root.is_none()
+                && !s.cwd.is_empty()
+            {
+                s.repo_root = Some(
+                    crate::worktree::repo_common_root(&s.cwd).unwrap_or_else(|| s.cwd.clone()),
+                );
+            }
+        }
+
+        let session = self.sessions.iter_mut().find(|s| s.id == effective_id)?;
+
+        // Update tmux pane if available.
+        if let Some(pane) = &payload.tmux_pane
+            && !pane.is_empty()
+        {
+            session.tmux_pane = Some(pane.clone());
+        }
+
+        // Cache transcript path (prefer agent_transcript_path for subagents).
+        if is_subagent {
+            if let Some(tp) = &payload.agent_transcript_path
+                && !tp.is_empty()
+            {
+                session.transcript_path = Some(tp.clone());
+            }
+        } else if let Some(tp) = &payload.transcript_path
+            && !tp.is_empty()
+        {
+            session.transcript_path = Some(tp.clone());
+        }
+
+        // Update cwd if available (skip for subagents — they share the parent's cwd).
+        if !is_subagent
+            && let Some(cwd) = &payload.cwd
+            && !cwd.is_empty()
+            && session.cwd != *cwd
+        {
+            session.cwd = cwd.clone();
+            session.project_name = cwd.split('/').next_back().unwrap_or(cwd).to_string();
+        }
+
+        // Stamp the originating host so later operations can route to the
+        // right tmux server. Only overwrite when the incoming payload
+        // asserts a host: a later local-only hook should not clobber a
+        // session that belongs to a remote machine.
+        if payload.host.is_some() {
+            session.host = payload.host.clone();
+        }
+
+        session.last_activity = std::time::Instant::now();
+
+        let event_name = payload.hook_event_name.as_deref().unwrap_or("");
+
+        // SubagentStop for a subagent means it's done.
+        if is_subagent && event_name == "SubagentStop" {
+            session.completed_at = Some(std::time::Instant::now());
+            session.status = SessionStatus::Completed;
+        } else {
+            let new_status = hook_event_to_status(event_name, payload, session)?;
+            session.status = new_status;
+        }
+
+        // Snapshot the values the caller needs before returning, while
+        // we still hold the &mut Session. After this the borrow ends.
+        let is_now_waiting = matches!(session.status, SessionStatus::WaitingForUser(_));
+        let display_name = session.display_name().to_string();
+        let status = session.status.clone();
+        let transcript_seed = if matches!(event_name, "Stop" | "SubagentStop") {
+            let path = session.transcript_path.clone()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| transcript::transcript_path(&session.cwd, &session.id));
+            Some(TranscriptSeed {
+                session_id: session.id.clone(),
+                path,
+                cwd: session.cwd.clone(),
+            })
+        } else {
+            None
+        };
+
+        Some(HookEffect {
+            display_name,
+            status,
+            is_now_waiting,
+            transcript_seed,
+        })
     }
 
     /// Resolve or create a session for an incoming hook event.
