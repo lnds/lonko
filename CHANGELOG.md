@@ -1,3 +1,11 @@
+## v0.22.5 (2026-05-01)
+
+### Refactor
+
+- **ui**: extract layout + connector helpers from list::render
+- **app**: extract classify_click for shared double-click logic
+- **state**: collapse cache_pane_for_session pattern
+
 ## v0.22.4 (2026-04-30)
 
 ### Refactor
