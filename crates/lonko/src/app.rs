@@ -16,10 +16,12 @@ use crate::{
     ui,
 };
 
+mod inflight;
 mod navigate;
 mod panel;
 mod remote;
 pub use remote::attach_remote_agent;
+use inflight::InflightGuard;
 
 // ── Pure helpers (testable without App) ────────────────────────────────────────
 
@@ -1094,19 +1096,11 @@ impl App {
         // so a busy/slow tmux server can't stall the render loop here.
         if self.state.tick.is_multiple_of(10)
             && let Some(ref tx) = self.scan_tx
-            && !self.active_pane_inflight.load(std::sync::atomic::Ordering::SeqCst)
+            && let Some(guard) = InflightGuard::try_acquire(&self.active_pane_inflight)
         {
             let tx = tx.clone();
-            self.active_pane_inflight.store(true, std::sync::atomic::Ordering::SeqCst);
-            let inflight = self.active_pane_inflight.clone();
             tokio::task::spawn_blocking(move || {
-                struct Guard(std::sync::Arc<std::sync::atomic::AtomicBool>);
-                impl Drop for Guard {
-                    fn drop(&mut self) {
-                        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
-                    }
-                }
-                let _g = Guard(inflight);
+                let _g = guard;
                 let active = tmux::active_pane();
                 let _ = tx.send(Event::ActivePaneRefreshed(active));
             });
@@ -1127,25 +1121,18 @@ impl App {
         // lands as `Event::TmuxSessionsRefreshed`.
         if self.state.tick % 20 == 3
             && let Some(ref tx) = self.scan_tx
-            && !self.sessions_refresh_inflight.load(std::sync::atomic::Ordering::SeqCst)
+            && let Some(guard) = InflightGuard::try_acquire(&self.sessions_refresh_inflight)
         {
             let claude_panes: std::collections::HashSet<String> = self.state.sessions
                 .iter()
                 .filter_map(|s| s.tmux_pane.clone())
                 .collect();
             let tx = tx.clone();
-            self.sessions_refresh_inflight.store(true, std::sync::atomic::Ordering::SeqCst);
-            let inflight = self.sessions_refresh_inflight.clone();
             tokio::task::spawn_blocking(move || {
-                // Always clear the in-flight flag, even on panic, so a
-                // blip doesn't leave the refresh permanently stuck.
-                struct Guard(std::sync::Arc<std::sync::atomic::AtomicBool>);
-                impl Drop for Guard {
-                    fn drop(&mut self) {
-                        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
-                    }
-                }
-                let _g = Guard(inflight);
+                // `guard` clears the in-flight flag on Drop, even on
+                // panic — otherwise a blip would leave the refresh
+                // permanently stuck.
+                let _g = guard;
 
                 let mut sessions = tmux::list_tmux_sessions();
                 let pane_map = tmux::session_pane_map();
@@ -1164,7 +1151,7 @@ impl App {
         // out of the Agents list).
         if self.state.tick.is_multiple_of(50)
             && let Some(ref tx) = self.scan_tx
-            && !self.tmux_scan_inflight.load(std::sync::atomic::Ordering::SeqCst)
+            && let Some(guard) = InflightGuard::try_acquire(&self.tmux_scan_inflight)
         {
             let known_panes: Vec<String> = self.state.sessions
                 .iter()
@@ -1173,18 +1160,10 @@ impl App {
                 .collect();
             let own_pane = self.state.own_pane.clone();
             let tx_scan = tx.clone();
-            self.tmux_scan_inflight.store(true, std::sync::atomic::Ordering::SeqCst);
-            let inflight = self.tmux_scan_inflight.clone();
             // pgrep + walks `ps -o ppid=` per claude PID + `tmux list-panes -a`;
             // taken off the main thread to keep the event loop responsive.
             tokio::task::spawn_blocking(move || {
-                struct Guard(std::sync::Arc<std::sync::atomic::AtomicBool>);
-                impl Drop for Guard {
-                    fn drop(&mut self) {
-                        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
-                    }
-                }
-                let _g = Guard(inflight);
+                let _g = guard;
                 tmux_scanner::scan(&tx_scan, &known_panes, own_pane.as_deref());
             });
             // Reap local agents whose Claude process has exited. The scanner
