@@ -3205,4 +3205,209 @@ mod tests {
         let s = main_with_repo_branch("id", "/r/lonko", "feat/lonko-42-fix");
         assert_eq!(s.display_name(), "42-fix");
     }
+
+    // ── apply_hook ─────────────────────────────────────────────────────────────
+    //
+    // The deferred-side-effects layer in `App::handle_hook` depends on
+    // `apply_hook` returning the right `HookEffect` for each combination
+    // of inbound hook event and prior session state. These tests pin
+    // down the contract: which payloads are dropped, when an effect is
+    // produced, and which fields the caller can rely on.
+
+    fn empty_hook_payload() -> HookPayload {
+        HookPayload {
+            hook_event_name: None,
+            session_id: None,
+            transcript_path: None,
+            cwd: None,
+            tool_name: None,
+            prompt: None,
+            message: None,
+            notification_type: None,
+            tmux_pane: None,
+            host: None,
+            agent_id: None,
+            agent_type: None,
+            agent_transcript_path: None,
+        }
+    }
+
+    fn hook_for(event: &str, session_id: &str, cwd: &str) -> HookPayload {
+        HookPayload {
+            hook_event_name: Some(event.into()),
+            session_id: Some(session_id.into()),
+            cwd: Some(cwd.into()),
+            ..empty_hook_payload()
+        }
+    }
+
+    #[test]
+    fn apply_hook_drops_payload_without_session_id() {
+        let mut state = AppState::default();
+        let payload = HookPayload {
+            hook_event_name: Some("UserPromptSubmit".into()),
+            ..empty_hook_payload()
+        };
+        assert!(state.apply_hook(&payload, None).is_none());
+        assert!(state.sessions.is_empty(), "no session created");
+    }
+
+    #[test]
+    fn apply_hook_drops_subagent_without_agent_id() {
+        let mut state = AppState::default();
+        let payload = HookPayload {
+            hook_event_name: Some("Notification".into()),
+            session_id: Some("parent".into()),
+            agent_type: Some("explorer".into()),
+            // agent_id missing → drop
+            ..empty_hook_payload()
+        };
+        assert!(state.apply_hook(&payload, None).is_none());
+    }
+
+    #[test]
+    fn apply_hook_drops_unknown_event() {
+        let mut state = AppState::default();
+        let payload = hook_for("WeirdEvent", "s1", "/tmp/proj");
+        // Seed the session so resolve_hook_session creates it, then the
+        // unknown event drops in `hook_event_to_status`.
+        state.sessions.push(Session::new("s1".into(), 100, "/tmp/proj".into()));
+        assert!(state.apply_hook(&payload, None).is_none());
+    }
+
+    #[test]
+    fn apply_hook_user_prompt_returns_running_effect() {
+        let mut state = AppState::default();
+        state.sessions.push(Session::new("s1".into(), 100, "/tmp/proj".into()));
+        let payload = HookPayload {
+            prompt: Some("hello world".into()),
+            ..hook_for("UserPromptSubmit", "s1", "/tmp/proj")
+        };
+        let effect = state.apply_hook(&payload, None).expect("effect");
+        assert!(matches!(effect.status, SessionStatus::Running));
+        assert!(!effect.is_now_waiting);
+        assert!(effect.transcript_seed.is_none(), "non-Stop hooks omit the transcript seed");
+        let s = state.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(s.last_prompt.as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn apply_hook_notification_permission_marks_waiting() {
+        let mut state = AppState::default();
+        state.sessions.push(Session::new("s1".into(), 100, "/tmp/proj".into()));
+        let payload = HookPayload {
+            message: Some("approve cargo build?".into()),
+            notification_type: Some("permission_prompt".into()),
+            ..hook_for("Notification", "s1", "/tmp/proj")
+        };
+        let effect = state.apply_hook(&payload, None).expect("effect");
+        assert!(matches!(effect.status, SessionStatus::WaitingForUser(ref m) if m == "approve cargo build?"));
+        assert!(effect.is_now_waiting, "is_now_waiting drives auto_show_panel");
+    }
+
+    #[test]
+    fn apply_hook_stop_emits_transcript_seed() {
+        let mut state = AppState::default();
+        state.sessions.push(Session::new("s1".into(), 100, "/tmp/proj".into()));
+        let payload = hook_for("Stop", "s1", "/tmp/proj");
+        let effect = state.apply_hook(&payload, None).expect("effect");
+        let seed = effect.transcript_seed.expect("Stop produces a seed");
+        assert_eq!(seed.session_id, "s1");
+        assert_eq!(seed.cwd, "/tmp/proj");
+    }
+
+    #[test]
+    fn apply_hook_subagent_creates_inheriting_session() {
+        let mut state = AppState::default();
+        let mut parent = Session::new("parent".into(), 100, "/tmp/proj".into());
+        parent.repo_root = Some("/tmp/proj".into());
+        parent.depth = 0;
+        state.sessions.push(parent);
+
+        let payload = HookPayload {
+            hook_event_name: Some("UserPromptSubmit".into()),
+            session_id: Some("parent".into()),
+            agent_id: Some("sub-1".into()),
+            agent_type: Some("explorer".into()),
+            cwd: Some("/tmp/proj".into()),
+            prompt: Some("dig in".into()),
+            ..empty_hook_payload()
+        };
+        let effect = state.apply_hook(&payload, None).expect("effect");
+        assert!(matches!(effect.status, SessionStatus::Running));
+
+        let sub = state.sessions.iter().find(|s| s.id == "sub-1").expect("subagent created");
+        assert_eq!(sub.parent_id.as_deref(), Some("parent"));
+        assert_eq!(sub.depth, 1, "depth = parent + 1");
+        assert_eq!(sub.repo_root.as_deref(), Some("/tmp/proj"), "subagent inherits repo_root");
+        assert_eq!(sub.project_name, "explorer");
+    }
+
+    #[test]
+    fn apply_hook_subagent_stop_marks_completed() {
+        let mut state = AppState::default();
+        state.sessions.push(Session::new("parent".into(), 100, "/tmp/proj".into()));
+        // Pre-seed the subagent so the SubagentStop hits the
+        // is_subagent && SubagentStop short-circuit cleanly.
+        let mut sub = Session::new("sub-1".into(), 0, "/tmp/proj".into());
+        sub.parent_id = Some("parent".into());
+        state.sessions.push(sub);
+
+        let payload = HookPayload {
+            hook_event_name: Some("SubagentStop".into()),
+            session_id: Some("parent".into()),
+            agent_id: Some("sub-1".into()),
+            agent_type: Some("explorer".into()),
+            cwd: Some("/tmp/proj".into()),
+            ..empty_hook_payload()
+        };
+        let effect = state.apply_hook(&payload, None).expect("effect");
+        assert!(matches!(effect.status, SessionStatus::Completed));
+        let sub = state.sessions.iter().find(|s| s.id == "sub-1").unwrap();
+        assert!(sub.completed_at.is_some());
+    }
+
+    #[test]
+    fn apply_hook_updates_cwd_and_tmux_pane() {
+        let mut state = AppState::default();
+        state.sessions.push(Session::new("s1".into(), 100, "/tmp/proj".into()));
+        let payload = HookPayload {
+            tmux_pane: Some("%42".into()),
+            cwd: Some("/tmp/proj/sub".into()),
+            ..hook_for("PostToolUse", "s1", "/tmp/proj/sub")
+        };
+        state.apply_hook(&payload, None).expect("effect");
+        let s = state.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(s.tmux_pane.as_deref(), Some("%42"));
+        assert_eq!(s.cwd, "/tmp/proj/sub");
+        assert_eq!(s.project_name, "sub");
+    }
+
+    #[test]
+    fn apply_hook_stamps_host_when_payload_carries_one() {
+        let mut state = AppState::default();
+        state.sessions.push(Session::new("s1".into(), 100, "/tmp/proj".into()));
+        let payload = HookPayload {
+            host: Some("kayshon".into()),
+            ..hook_for("PostToolUse", "s1", "/tmp/proj")
+        };
+        state.apply_hook(&payload, None).expect("effect");
+        let s = state.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(s.host.as_deref(), Some("kayshon"));
+    }
+
+    #[test]
+    fn apply_hook_does_not_clobber_existing_host_with_local_hook() {
+        let mut state = AppState::default();
+        let mut s = Session::new("s1".into(), 100, "/tmp/proj".into());
+        s.host = Some("kayshon".into());
+        state.sessions.push(s);
+        // Subsequent local-only hook (no host field) must NOT erase the
+        // remote stamp — that would misroute future permission sends to
+        // the local tmux server.
+        let payload = hook_for("PostToolUse", "s1", "/tmp/proj");
+        state.apply_hook(&payload, None).expect("effect");
+        let s = state.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(s.host.as_deref(), Some("kayshon"));
+    }
 }
