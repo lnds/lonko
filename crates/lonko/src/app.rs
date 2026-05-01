@@ -431,9 +431,7 @@ impl App {
                 let pane = session.tmux_pane.clone()
                     .or_else(|| tmux::find_pane_for_pid(pid));
                 if let Some(p) = pane {
-                    if let Some(s) = self.state.sessions.iter_mut().find(|s| s.id == session_id) {
-                        s.tmux_pane = Some(p.clone());
-                    }
+                    self.state.cache_pane_for_session(&session_id, &p);
                     self.state.focused_session_id = Some(session_id);
                     // Do the window move + switch-client up front so the
                     // user lands on a window that already has the sidebar
@@ -648,11 +646,9 @@ impl App {
             session.tmux_pane.clone()
                 .or_else(|| tmux::find_pane_for_pid(pid))
         };
-        if let Some(ref p) = pane
-            && let Some(s) = self.state.sessions.iter_mut().find(|s| s.id == session_id)
-                && s.tmux_pane.is_none() {
-                    s.tmux_pane = Some(p.clone());
-                }
+        if let Some(ref p) = pane {
+            self.state.cache_pane_for_session(&session_id, p);
+        }
         let Some(pane) = pane else { return };
         let result = match host.as_deref() {
             Some(h) => tmux::send_keys_remote(h, &pane, key),
@@ -1822,9 +1818,7 @@ impl App {
         let pane = session.tmux_pane.clone()
             .or_else(|| tmux::find_pane_for_pid(pid));
         if let Some(ref pane) = pane {
-            if let Some(s) = self.state.sessions.iter_mut().find(|s| s.id == session_id) {
-                s.tmux_pane = Some(pane.clone());
-            }
+            self.state.cache_pane_for_session(&session_id, pane);
             // Set selected to the matching index in the visible list (which
             // may differ from the ordered list when a search filter is active).
             let vis = self.state.visible_sessions();

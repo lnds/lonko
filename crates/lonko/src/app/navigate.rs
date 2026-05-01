@@ -61,9 +61,7 @@ impl App {
         if let Some(ref pane) = pane {
             tracing::debug!("focus_selected: pane={pane} pid={pid}");
             // Cache the discovered pane
-            if let Some(s) = self.state.sessions.iter_mut().find(|s| s.id == session_id) {
-                s.tmux_pane = Some(pane.clone());
-            }
+            self.state.cache_pane_for_session(&session_id, pane);
             self.focus_local_agent_pane(pane);
             self.state.focused_session_id = Some(session_id);
         } else {

@@ -1375,6 +1375,17 @@ impl AppState {
         });
     }
 
+    /// Cache the tmux pane id of a session by id. Used after the pane
+    /// has been discovered via `find_pane_for_pid` or first reported
+    /// via a hook, so subsequent operations (focus, kill, permission
+    /// send) can take the fast path without re-walking the process
+    /// tree. Silently ignores unknown ids.
+    pub fn cache_pane_for_session(&mut self, session_id: &str, pane: &str) {
+        if let Some(s) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+            s.tmux_pane = Some(pane.to_string());
+        }
+    }
+
     /// Apply a hook payload to the state: resolve the session, mutate
     /// its fields, compute the new status, and return a `HookEffect`
     /// that carries the values `App::handle_hook` needs to orchestrate
