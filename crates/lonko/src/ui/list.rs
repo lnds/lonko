@@ -449,80 +449,21 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         );
     }
 
-    // Cards — variable height, with optional 1-line group headers interleaved
-    // before the first card of any multi-agent group. For each page element
-    // we remember its (optional remote-sep, optional header, optional card)
-    // chunk indices so the render loop can find them back without
-    // re-deriving the layout. Collapsed groups get a header but no card.
-    let mut card_constraints: Vec<Constraint> = Vec::with_capacity(page.len() * 4);
-    let mut slot_chunks: Vec<(Option<usize>, Option<usize>, Option<usize>)> =
-        Vec::with_capacity(page.len());
-    for (i, s) in page.iter().enumerate() {
-        let global_idx = scroll + i;
-        let is_collapsed = collapsed_flags[global_idx];
-        let remote_sep_idx = if remote_sep_flags[global_idx] {
-            card_constraints.push(Constraint::Length(REMOTE_SEP_HEIGHT));
-            Some(card_constraints.len() - 1)
-        } else {
-            None
-        };
-        let header_idx = if header_flags[global_idx] {
-            card_constraints.push(Constraint::Length(GROUP_HEADER_HEIGHT));
-            Some(card_constraints.len() - 1)
-        } else {
-            None
-        };
-        let card_idx = if is_collapsed {
-            // Collapsed: no card, only header
-            None
-        } else {
-            let mut ch = card_height(s, &state.bookmarks);
-            if global_idx == state.selected && state.bookmark.mode
-                && !state.bookmarks.contains_key(&s.cwd)
-            {
-                ch += 1;
-            }
-            card_constraints.push(Constraint::Length(ch));
-            Some(card_constraints.len() - 1)
-        };
-        slot_chunks.push((remote_sep_idx, header_idx, card_idx));
-        if i < page.len() - 1 {
-            card_constraints.push(Constraint::Length(SEP_HEIGHT));
-        }
-    }
+    let (card_constraints, slot_chunks) = build_card_constraints(
+        page,
+        scroll,
+        state,
+        &header_flags,
+        &collapsed_flags,
+        &remote_sep_flags,
+    );
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(card_constraints)
         .split(outer[1]);
 
-    // Connect cards of the same multi-main group by drawing `│` at column 0
-    // of the separator row between them. The cards themselves already have
-    // a `Borders::LEFT` stripe at that column, so the bar on the sep row
-    // visually stitches those stripes into one continuous vertical line —
-    // no extra gutter column needed.
-    for (i, _) in page.iter().enumerate() {
-        if i + 1 >= page.len() { break; }
-        let a = scroll + i;
-        let b = a + 1;
-        if group_keys[a].is_some() && group_keys[a] == group_keys[b]
-            && let (_, _, Some(card_idx)) = slot_chunks[i] {
-                let sep_idx = card_idx + 1;
-                if sep_idx < chunks.len() {
-                    let sep = chunks[sep_idx];
-                    if sep.width > 0 && sep.height > 0 {
-                        let bar_rect = Rect { x: sep.x, y: sep.y, width: 1, height: 1 };
-                        frame.render_widget(
-                            Paragraph::new(Line::from(Span::styled(
-                                "│",
-                                Style::default().fg(BORDER_INACTIVE),
-                            ))),
-                            bar_rect,
-                        );
-                    }
-                }
-            }
-    }
+    render_group_connectors(frame, page, scroll, &group_keys, &slot_chunks, &chunks);
 
     for (i, session) in page.iter().enumerate() {
         let (remote_sep_idx, header_idx, card_idx) = slot_chunks[i];
@@ -585,6 +526,99 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
             ])),
             outer[2],
         );
+    }
+}
+
+/// Per-page slot map: for each visible session, which chunk indices
+/// (if any) hold the remote-separator row, the group header, and the
+/// card body. `None` means the session doesn't render that slot
+/// (e.g., a collapsed group has a header but no body).
+type SlotChunks = (Option<usize>, Option<usize>, Option<usize>);
+
+/// Walk the page once and build the per-row layout constraints
+/// alongside a slot map that the render loop can use to find each
+/// row's chunks back without re-deriving the layout. Pulled out of
+/// `render` to keep the main flow readable; the constraint vector
+/// alone is ~40 lines of conditional pushes.
+fn build_card_constraints(
+    page: &[&Session],
+    scroll: usize,
+    state: &AppState,
+    header_flags: &[bool],
+    collapsed_flags: &[bool],
+    remote_sep_flags: &[bool],
+) -> (Vec<Constraint>, Vec<SlotChunks>) {
+    let mut card_constraints: Vec<Constraint> = Vec::with_capacity(page.len() * 4);
+    let mut slot_chunks: Vec<SlotChunks> = Vec::with_capacity(page.len());
+    for (i, s) in page.iter().enumerate() {
+        let global_idx = scroll + i;
+        let is_collapsed = collapsed_flags[global_idx];
+        let remote_sep_idx = if remote_sep_flags[global_idx] {
+            card_constraints.push(Constraint::Length(REMOTE_SEP_HEIGHT));
+            Some(card_constraints.len() - 1)
+        } else {
+            None
+        };
+        let header_idx = if header_flags[global_idx] {
+            card_constraints.push(Constraint::Length(GROUP_HEADER_HEIGHT));
+            Some(card_constraints.len() - 1)
+        } else {
+            None
+        };
+        let card_idx = if is_collapsed {
+            // Collapsed: no card, only header
+            None
+        } else {
+            let mut ch = card_height(s, &state.bookmarks);
+            if global_idx == state.selected && state.bookmark.mode
+                && !state.bookmarks.contains_key(&s.cwd)
+            {
+                ch += 1;
+            }
+            card_constraints.push(Constraint::Length(ch));
+            Some(card_constraints.len() - 1)
+        };
+        slot_chunks.push((remote_sep_idx, header_idx, card_idx));
+        if i < page.len() - 1 {
+            card_constraints.push(Constraint::Length(SEP_HEIGHT));
+        }
+    }
+    (card_constraints, slot_chunks)
+}
+
+/// Connect cards of the same multi-main group by drawing `│` at
+/// column 0 of the separator row between them. The cards themselves
+/// already carry a `Borders::LEFT` stripe at that column, so the bar
+/// on the sep row visually stitches those stripes into one continuous
+/// vertical line — no extra gutter column needed.
+fn render_group_connectors(
+    frame: &mut Frame,
+    page: &[&Session],
+    scroll: usize,
+    group_keys: &[Option<&str>],
+    slot_chunks: &[SlotChunks],
+    chunks: &[Rect],
+) {
+    for (i, slot) in slot_chunks.iter().enumerate() {
+        if i + 1 >= page.len() { break; }
+        let a = scroll + i;
+        let b = a + 1;
+        if group_keys[a].is_some() && group_keys[a] == group_keys[b]
+            && let (_, _, Some(card_idx)) = *slot
+        {
+            let sep_idx = card_idx + 1;
+            if sep_idx >= chunks.len() { continue; }
+            let sep = chunks[sep_idx];
+            if sep.width == 0 || sep.height == 0 { continue; }
+            let bar_rect = Rect { x: sep.x, y: sep.y, width: 1, height: 1 };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "│",
+                    Style::default().fg(BORDER_INACTIVE),
+                ))),
+                bar_rect,
+            );
+        }
     }
 }
 
