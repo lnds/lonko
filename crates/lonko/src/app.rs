@@ -1367,8 +1367,69 @@ impl App {
 
     fn on_key(&mut self, key: crossterm::event::KeyEvent) -> Result<bool> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // Hard exit always wins, regardless of the active modal. The
+        // previous design swallowed Ctrl-C inside `pr_picker.mode` so
+        // it could cancel the picker first, but the user could end up
+        // hitting Ctrl-C several times with no visible effect when the
+        // overlay didn't render in narrow panes. Exit unconditionally
+        // — modal state is process-local and doesn't need cleanup.
+        if ctrl && matches!(key.code, KeyCode::Char('c')) {
+            return Ok(true);
+        }
+
+        if let Some(outcome) = self.dispatch_modal_key(key.code, ctrl) {
+            return Ok(outcome);
+        }
+        self.dispatch_normal_key(key.code, ctrl)
+    }
+
+    /// Activate the currently-selected row in the active tab. Enter-key
+    /// dispatch: agents → focus the agent's pane, sessions → focus the
+    /// tmux session, remote → SSH-attach to the picked session.
+    fn activate_selected(&mut self) {
+        if self.state.active_tab == Tab::Sessions {
+            self.focus_tmux_session();
+            self.state.tmux_expanded = false;
+        } else if self.state.active_tab == Tab::Remote {
+            self.attach_remote_session();
+        } else {
+            self.focus_selected();
+        }
+    }
+
+    /// Move the cursor in the currently-active tab. `delta` is `+1` for
+    /// "down/next" and `-1` for "up/prev". Sessions tab also handles
+    /// the within-session window cursor when expanded.
+    fn navigate_by_tab(&mut self, delta: isize) {
+        match self.state.active_tab {
+            Tab::Sessions => {
+                if self.state.tmux_expanded {
+                    self.state.navigate_tmux_window(delta);
+                } else {
+                    self.state.navigate_tmux_session(delta);
+                }
+            }
+            Tab::Remote => self.state.navigate_remote(delta),
+            _ => {
+                if delta >= 0 {
+                    self.state.select_next();
+                } else {
+                    self.state.select_prev();
+                }
+                if self.state.show_detail { self.refresh_selected_transcript(); }
+            }
+        }
+    }
+
+    /// If a modal is currently open, route the key to its handler and
+    /// return `Some(should_quit)`. Returns `None` when no modal claims
+    /// the key, so the caller can fall through to the global handler.
+    /// Modals are mutually exclusive in practice; the order below
+    /// reflects that — the first match wins.
+    fn dispatch_modal_key(&mut self, code: KeyCode, ctrl: bool) -> Option<bool> {
         if self.state.bookmark.mode {
-            if let Some(note) = self.state.apply_bookmark_key(key.code, ctrl)
+            if let Some(note) = self.state.apply_bookmark_key(code, ctrl)
                 && let Some(session) = self.state.selected_session() {
                     let cwd = session.cwd.clone();
                     if note.is_empty() {
@@ -1378,57 +1439,54 @@ impl App {
                     }
                     crate::state::save_bookmarks(&self.state.bookmarks);
                 }
-            return Ok(false);
+            return Some(false);
         }
         if self.state.new_agent.mode {
-            if let Some((prompt, cwd)) = self.state.apply_new_agent_key(key.code, ctrl) {
+            if let Some((prompt, cwd)) = self.state.apply_new_agent_key(code, ctrl) {
                 self.spawn_new_agent(&cwd, &prompt);
             }
-            return Ok(false);
+            return Some(false);
         }
         if self.state.pr_picker.mode {
-            // Ctrl-C exits lonko entirely (same as the main handler). This
-            // keeps the shortcut consistent even when a modal is open — the
-            // previous "swallow Ctrl-C to close the modal" behavior left
-            // users hitting Ctrl-C repeatedly with no visible effect when
-            // the overlay didn't render in narrow panes.
-            if ctrl && matches!(key.code, KeyCode::Char('c')) {
-                self.state.clear_pr_picker();
-                return Ok(true);
-            }
-            if let Some(submit) = self.state.apply_pr_picker_key(key.code, ctrl)
+            if let Some(submit) = self.state.apply_pr_picker_key(code, ctrl)
                 && !submit.cwd.is_empty()
             {
                 self.spawn_pr_by_number(&submit.cwd, submit.number, &submit.title);
             }
-            return Ok(false);
+            return Some(false);
         }
         if self.state.worktree.mode {
-            if let Some(branch) = self.state.apply_worktree_key(key.code, ctrl) {
+            if let Some(branch) = self.state.apply_worktree_key(code, ctrl) {
                 let cwd = self.state.worktree.cwd.take().unwrap_or_default();
                 if !cwd.is_empty() {
                     self.spawn_worktree(&cwd, &branch);
                 }
             }
-            return Ok(false);
+            return Some(false);
         }
         if self.state.search_mode {
-            if self.state.apply_search_key(key.code, ctrl) == KeyOutcome::Quit {
-                return Ok(true);
+            if self.state.apply_search_key(code, ctrl) == KeyOutcome::Quit {
+                return Some(true);
             }
-            return Ok(false);
+            return Some(false);
         }
         if self.state.show_help {
-            match key.code {
+            match code {
                 KeyCode::Esc
                 | KeyCode::Char('?')
                 | KeyCode::Char('h')
                 | KeyCode::Char('q') => self.state.show_help = false,
                 _ => {}
             }
-            return Ok(false);
+            return Some(false);
         }
-        match key.code {
+        None
+    }
+
+    /// Global key handler: runs when no modal is open. The big match
+    /// of the application's main keymap.
+    fn dispatch_normal_key(&mut self, code: KeyCode, ctrl: bool) -> Result<bool> {
+        match code {
             KeyCode::Esc => {
                 if self.state.active_tab == Tab::Sessions && self.state.tmux_expanded {
                     self.state.tmux_expanded = false;
@@ -1453,38 +1511,8 @@ impl App {
             }
             KeyCode::Char('q') => { self.hide_panel(); }
             KeyCode::Char('c') if ctrl => return Ok(true),
-            KeyCode::Char('j') | KeyCode::Down => {
-                match self.state.active_tab {
-                    Tab::Sessions => {
-                        if self.state.tmux_expanded {
-                            self.state.navigate_tmux_window(1);
-                        } else {
-                            self.state.navigate_tmux_session(1);
-                        }
-                    }
-                    Tab::Remote => self.state.navigate_remote(1),
-                    _ => {
-                        self.state.select_next();
-                        if self.state.show_detail { self.refresh_selected_transcript(); }
-                    }
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                match self.state.active_tab {
-                    Tab::Sessions => {
-                        if self.state.tmux_expanded {
-                            self.state.navigate_tmux_window(-1);
-                        } else {
-                            self.state.navigate_tmux_session(-1);
-                        }
-                    }
-                    Tab::Remote => self.state.navigate_remote(-1),
-                    _ => {
-                        self.state.select_prev();
-                        if self.state.show_detail { self.refresh_selected_transcript(); }
-                    }
-                }
-            }
+            KeyCode::Char('j') | KeyCode::Down => self.navigate_by_tab(1),
+            KeyCode::Char('k') | KeyCode::Up => self.navigate_by_tab(-1),
             KeyCode::Char('h') if self.state.active_tab == Tab::Agents => {
                 self.state.show_help = true;
             }
@@ -1545,16 +1573,7 @@ impl App {
                     self.state.tmux_window_cursor = Some(active_idx);
                 }
             }
-            KeyCode::Enter => {
-                if self.state.active_tab == Tab::Sessions {
-                    self.focus_tmux_session();
-                    self.state.tmux_expanded = false;
-                } else if self.state.active_tab == Tab::Remote {
-                    self.attach_remote_session();
-                } else {
-                    self.focus_selected();
-                }
-            }
+            KeyCode::Enter => self.activate_selected(),
             KeyCode::Char('b') if self.state.active_tab == Tab::Agents => {
                 if let Some(session) = self.state.selected_session() {
                     let cwd = session.cwd.clone();
