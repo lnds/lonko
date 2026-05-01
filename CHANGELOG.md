@@ -1,3 +1,11 @@
+## v0.22.4 (2026-04-30)
+
+### Refactor
+
+- **state**: extract apply_hook + HookEffect for testable state
+- **app**: split on_key into modal/normal dispatchers
+- **app**: collapse the inflight-guard pattern into a helper
+
 ## v0.22.3 (2026-04-30)
 
 ### Refactor
