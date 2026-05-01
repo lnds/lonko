@@ -360,51 +360,21 @@ impl App {
             return;
         }
 
-        // Double-click detection: two clicks on the same card within
-        // 400 ms → focus. The session id is captured to defend against
-        // the agents list reordering between the two clicks (new agent
-        // discovered, completion pruning, etc.); without that check
-        // the second click could fire the action on a different agent
-        // that happens to have slid into the same global_idx.
-        //
-        // Lockout: the focus/attach action is synchronous and can take
-        // 1-3 s. Anything the user clicks during that window queues up
-        // and drains all at once when the action returns. The lockout
-        // window is stamped AFTER the action returns (see below) so it
-        // covers the entire backlog regardless of how long the action
-        // ran. Within `ACTION_LOCKOUT_MS` of the last completion we
-        // degrade clicks to plain selection so they can't multi-trigger.
-        const ACTION_LOCKOUT_MS: u128 = 1000;
-        let now = std::time::Instant::now();
-        let in_lockout = self.last_action_at
-            .is_some_and(|t| now.duration_since(t).as_millis() < ACTION_LOCKOUT_MS);
-        // Identify the row by its session id; `None` means the index is
-        // out of bounds (list shrunk between layout and click). Reject
-        // empty ids on the second click so two clicks on a "missing"
-        // row don't accidentally satisfy `last_id == &click_id` and
-        // fire the action against `selected_session()`.
-        //
+        // Identify the row by its session id; `None` means the index
+        // is out of bounds (list shrunk between layout and click).
         // Index into `visible` (the sorted/filtered list used to compute
         // the layout), not `self.state.sessions` (the raw list). Group
         // sorting reorders `visible` so the two indices diverge as soon
         // as more than one repo group is present, and the bug surfaces
         // as the wrong session being selected/double-clicked.
-        let click_id = visible.get(global_idx).map(|s| s.id.clone());
-        if click_id.is_none() {
-            self.last_click = None;
-            return;
-        }
-        let click_id = click_id.unwrap();
-        let is_double = !in_lockout
-            && self.last_click
-                .as_ref()
-                .is_some_and(|(last_tab, last_idx, last_time, last_id)| {
-                    *last_tab == Tab::Agents
-                        && *last_idx == global_idx
-                        && last_id == &click_id
-                        && now.duration_since(*last_time).as_millis() < 400
-                });
-        self.last_click = Some((Tab::Agents, global_idx, now, click_id));
+        let click_id = match visible.get(global_idx).map(|s| s.id.clone()) {
+            Some(id) => id,
+            None => {
+                self.last_click = None;
+                return;
+            }
+        };
+        let is_double = self.classify_click(Tab::Agents, global_idx, click_id);
 
         if is_double {
             // Clear the previous click so the next user click starts
@@ -491,35 +461,21 @@ impl App {
 
         let row_within_card = row_in_list - card_row_start;
 
-        // Double-click detection: two clicks on the same card within
-        // 400 ms. The session name is captured (see Agents-tab handler)
-        // so a list refresh between the clicks cannot route the action
-        // to a different session that landed at the same index. The
-        // `last_action_at` lockout (also documented on the Agents-tab
-        // handler) keeps queued clicks from re-firing the action when
-        // the synchronous attach finally returns.
-        const ACTION_LOCKOUT_MS: u128 = 1000;
-        let now = std::time::Instant::now();
-        let in_lockout = self.last_action_at
-            .is_some_and(|t| now.duration_since(t).as_millis() < ACTION_LOCKOUT_MS);
-        let click_id = self.state.visible_tmux_sessions()
+        // Identify the row by its session name (Sessions tab uses
+        // names, Agents tab uses ids). The capture defends against
+        // list refreshes between clicks routing the action to a
+        // different session that slid into the same index.
+        let click_id = match self.state.visible_tmux_sessions()
             .get(global_idx)
-            .map(|s| s.name.clone());
-        if click_id.is_none() {
-            self.last_click = None;
-            return;
-        }
-        let click_id = click_id.unwrap();
-        let is_double = !in_lockout
-            && self.last_click
-                .as_ref()
-                .is_some_and(|(last_tab, last_idx, last_time, last_id)| {
-                    *last_tab == Tab::Sessions
-                        && *last_idx == global_idx
-                        && last_id == &click_id
-                        && now.duration_since(*last_time).as_millis() < 400
-                });
-        self.last_click = Some((Tab::Sessions, global_idx, now, click_id));
+            .map(|s| s.name.clone())
+        {
+            Some(id) => id,
+            None => {
+                self.last_click = None;
+                return;
+            }
+        };
+        let is_double = self.classify_click(Tab::Sessions, global_idx, click_id);
 
         let is_selected = global_idx == self.state.tmux_selected;
         let is_expanded = is_selected && self.state.tmux_expanded;
@@ -564,6 +520,36 @@ impl App {
     }
 
     /// Mouse wheel scroll: navigate the current tab's list by `delta` (+1 down, -1 up).
+    /// Evaluate a click at `(tab, global_idx)` with the row's stable
+    /// id (session id for Agents, session name for Sessions) and
+    /// update the last-click bookkeeping. Returns `true` when the
+    /// click should be treated as a double-click: same tab, same row
+    /// id, ≤ 400 ms since the previous click, and we're not in the
+    /// post-action lockout window. Single-click otherwise.
+    ///
+    /// The lockout timestamp is stamped by the caller AFTER the
+    /// synchronous focus/attach action returns, so the whole
+    /// click backlog the user racked up during the action is
+    /// covered when it finally drains.
+    fn classify_click(&mut self, tab: Tab, global_idx: usize, click_id: String) -> bool {
+        const ACTION_LOCKOUT_MS: u128 = 1000;
+        const DOUBLE_CLICK_MS: u128 = 400;
+        let now = std::time::Instant::now();
+        let in_lockout = self.last_action_at
+            .is_some_and(|t| now.duration_since(t).as_millis() < ACTION_LOCKOUT_MS);
+        let is_double = !in_lockout
+            && self.last_click
+                .as_ref()
+                .is_some_and(|(last_tab, last_idx, last_time, last_id)| {
+                    *last_tab == tab
+                        && *last_idx == global_idx
+                        && last_id == &click_id
+                        && now.duration_since(*last_time).as_millis() < DOUBLE_CLICK_MS
+                });
+        self.last_click = Some((tab, global_idx, now, click_id));
+        is_double
+    }
+
     fn handle_mouse_scroll(&mut self, delta: isize) {
         match self.state.active_tab {
             Tab::Agents => {
