@@ -486,6 +486,11 @@ pub struct AppState {
     /// PRs for the repo of the selected agent so the user can pick one
     /// to review in a fresh worktree.
     pub pr_picker: PrPickerState,
+    /// Open-PR numbers per repo, keyed by `repo_root` → branch → PR number.
+    /// Refreshed in the background every ~30s by a `gh pr list` call per
+    /// unique local `repo_root`. Drives the `#NNNN` badge on agent cards;
+    /// absence means "no open PR for that branch" (or `gh` unavailable).
+    pub pr_numbers_by_repo: HashMap<String, HashMap<String, u32>>,
 }
 
 /// One row in the PR picker list. Mirrors the subset of `gh pr list --json`
@@ -642,6 +647,7 @@ impl Default for AppState {
             remote_enabled: false,
             remote_poll_ticks: 300, // 30s default; matches RemoteConfig::default
             pr_picker: PrPickerState::default(),
+            pr_numbers_by_repo: HashMap::new(),
         }
     }
 }
@@ -832,6 +838,15 @@ impl AppState {
             .iter()
             .filter(|s| s.depth == 0 && s.repo_root.as_deref() == Some(repo_root))
             .count()
+    }
+
+    /// Look up the open-PR number for a `(repo_root, branch)` pair, if the
+    /// background refresh has seen one. Returns `None` when either side is
+    /// missing, the repo hasn't been polled yet, or no open PR exists.
+    pub fn pr_number_for(&self, repo_root: Option<&str>, branch: Option<&str>) -> Option<u32> {
+        let root = repo_root?;
+        let branch = branch?;
+        self.pr_numbers_by_repo.get(root)?.get(branch).copied()
     }
 
     pub fn visible_len(&self) -> usize {
@@ -3420,5 +3435,37 @@ mod tests {
         state.apply_hook(&payload, None).expect("effect");
         let s = state.sessions.iter().find(|s| s.id == "s1").unwrap();
         assert_eq!(s.host.as_deref(), Some("kayshon"));
+    }
+
+    #[test]
+    fn pr_number_for_returns_known_pair() {
+        let mut state = AppState::default();
+        let mut prs = HashMap::new();
+        prs.insert("feat/badge".to_string(), 42u32);
+        prs.insert("fix/oops".to_string(), 7u32);
+        state.pr_numbers_by_repo.insert("/repo".to_string(), prs);
+        assert_eq!(state.pr_number_for(Some("/repo"), Some("feat/badge")), Some(42));
+        assert_eq!(state.pr_number_for(Some("/repo"), Some("fix/oops")), Some(7));
+    }
+
+    #[test]
+    fn pr_number_for_is_none_when_inputs_missing() {
+        let mut state = AppState::default();
+        state
+            .pr_numbers_by_repo
+            .insert("/repo".to_string(), HashMap::from([("main".to_string(), 1u32)]));
+        assert_eq!(state.pr_number_for(None, Some("main")), None);
+        assert_eq!(state.pr_number_for(Some("/repo"), None), None);
+        assert_eq!(state.pr_number_for(None, None), None);
+    }
+
+    #[test]
+    fn pr_number_for_is_none_for_unknown_repo_or_branch() {
+        let mut state = AppState::default();
+        state
+            .pr_numbers_by_repo
+            .insert("/repo".to_string(), HashMap::from([("main".to_string(), 1u32)]));
+        assert_eq!(state.pr_number_for(Some("/other"), Some("main")), None);
+        assert_eq!(state.pr_number_for(Some("/repo"), Some("nonexistent")), None);
     }
 }

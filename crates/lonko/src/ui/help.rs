@@ -51,6 +51,7 @@ pub fn render(frame: &mut Frame) {
         key_line("b", "Bookmark (Agents)"),
         key_line("g", "Worktree (Agents)"),
         key_line("p", "Pick PR → worktree (Agents)"),
+        key_line("o", "Open PR in browser (Agents)"),
         key_line("n", "New agent (Agents)"),
         key_line("e", "Expand subagents"),
         key_line("x", "Kill + remove wt"),

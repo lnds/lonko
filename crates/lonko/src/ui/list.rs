@@ -510,10 +510,17 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         let subagent_count = state.subagent_count_for(&session.id);
         let subagents_expanded = state.expanded_subagents.contains(&session.id);
         let dup_suffix = dup_suffixes.get(global_idx).and_then(|o| o.as_deref());
+        // Remote agents have no `repo_root` populated (gh runs locally and
+        // can't see the remote repo's PR list anyway), so `pr_number_for`
+        // naturally returns `None` for them — no extra guard needed here.
+        let pr_number = state.pr_number_for(
+            session.repo_root.as_deref(),
+            session.branch.as_deref(),
+        );
         render_session_card(frame, chunks[chunk_idx], session, CardCtx {
             selected, focused, tick: state.tick, position, icon, bookmark_note,
             worktree_input, bookmark_input, subagent_count, subagents_expanded,
-            dup_suffix,
+            dup_suffix, pr_number,
         });
     }
 
@@ -643,13 +650,17 @@ struct CardCtx<'a> {
     /// Disambiguating suffix appended to the title when another visible
     /// agent shares the same display name (e.g. two agents on `main`).
     dup_suffix: Option<&'a str>,
+    /// Open-PR number for the agent's `(repo_root, branch)`, if known.
+    /// Renders as a `#NNNN` badge on the model line; `None` shows nothing
+    /// (no badge — absence is the "no open PR" signal).
+    pr_number: Option<u32>,
 }
 
 fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: CardCtx<'_>) {
     let CardCtx {
         selected, focused, tick, position, icon, bookmark_note,
         worktree_input, bookmark_input, subagent_count, subagents_expanded,
-        dup_suffix,
+        dup_suffix, pr_number,
     } = ctx;
     if session.is_subagent() {
         render_subagent_row(frame, area, session, selected, focused);
@@ -884,11 +895,33 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
         .unwrap_or_else(|| "?".into());
 
     let ctx_k = session.context_used / 1000;
-    let info_line = Line::from(vec![
+    // Line 4: `model  #NNNN  ctx_K ctx`. The PR badge sits between the
+    // model and the ctx so the ctx label always anchors the right side.
+    // When the card is too narrow to fit all three pieces we drop the
+    // badge first (the ctx is a live metric and must never be sacrificed).
+    // Budget: indent(4) + model + "  " + "#" + digits + "  " + "{ctx}K ctx".
+    let model_w = UnicodeWidthStr::width(model_str.as_str());
+    let ctx_label = format!("{}K ctx", ctx_k);
+    let ctx_w = UnicodeWidthStr::width(ctx_label.as_str());
+    let pr_badge = pr_number.map(|n| format!("#{n}"));
+    let pr_w = pr_badge.as_deref().map(UnicodeWidthStr::width).unwrap_or(0);
+    let baseline = 4 + model_w + 2 + ctx_w; // indent + model + "  " + ctx
+    let with_badge = baseline + pr_w + 2; // additional "#NNNN  "
+    let mut info_spans = vec![
         Span::raw(indent),
         Span::styled(model_str, Style::default().fg(SUBTLE)),
-        Span::styled(format!("  {}K ctx", ctx_k), Style::default().fg(DIM)),
-    ]);
+    ];
+    if let Some(badge) = pr_badge
+        && with_badge <= area.width as usize
+    {
+        info_spans.push(Span::raw("  "));
+        info_spans.push(Span::styled(
+            badge,
+            Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+        ));
+    }
+    info_spans.push(Span::styled(format!("  {}", ctx_label), Style::default().fg(DIM)));
+    let info_line = Line::from(info_spans);
 
     // Line 5: context progress bar
     let inner_width = area.width.saturating_sub(3) as usize;

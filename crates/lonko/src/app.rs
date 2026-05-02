@@ -106,6 +106,11 @@ pub struct App {
     /// or otherwise) via a guard struct.
     sessions_refresh_inflight: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tmux_scan_inflight: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// In-flight guard for the per-30 s open-PR refresh. The blocking task
+    /// fans out one `gh pr list` per unique local `repo_root`; each call
+    /// can take 100-500 ms, and stacking them on a slow network would
+    /// burn `gh` invocations without delivering fresher data.
+    pr_refresh_inflight: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// In-flight guard for the per-second `active_pane()` poll. The two
     /// tmux forks (`list-clients` + `display-message`) used to run on
     /// the event loop, blocking the render every second whenever tmux
@@ -160,6 +165,7 @@ impl App {
             last_action_at: None,
             sessions_refresh_inflight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tmux_scan_inflight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pr_refresh_inflight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             active_pane_inflight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             focus_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             remote_bridges: std::collections::HashMap::new(),
@@ -875,6 +881,10 @@ impl App {
                     }
                 }
             }
+            Event::PrsByRepoRefreshed { repo_root, items } => {
+                let map: std::collections::HashMap<String, u32> = items.into_iter().collect();
+                self.state.pr_numbers_by_repo.insert(repo_root, map);
+            }
         }
         Ok(false)
     }
@@ -964,6 +974,52 @@ impl App {
             self.state.reap_dead_local_sessions(|pid| unsafe {
                 libc::kill(pid as libc::pid_t, 0) == 0
             });
+        }
+
+        // Refresh open-PR numbers per repo every 30 s. One `gh pr list` per
+        // unique local `repo_root`; results land as `PrsByRepoRefreshed` and
+        // populate the cache the agent-card renderer consults to draw the
+        // `#NNNN` badge. Errors are logged and ignored — the cache then
+        // simply stays at its last good value, so a flaky network doesn't
+        // make badges flicker. The `+ 7` offset spaces this work away from
+        // the other periodic tasks scheduled in `on_tick` (multiples of 10,
+        // 20, 50, 100).
+        if self.state.tick % 300 == 7
+            && let Some(ref tx) = self.scan_tx
+            && let Some(guard) = InflightGuard::try_acquire(&self.pr_refresh_inflight)
+        {
+            let repos: Vec<String> = self.state.sessions
+                .iter()
+                .filter(|s| s.host.is_none())
+                .filter_map(|s| s.repo_root.clone())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            if repos.is_empty() {
+                drop(guard);
+            } else {
+                let tx = tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _g = guard;
+                    if !crate::worktree::has_gh() {
+                        return;
+                    }
+                    for repo_root in repos {
+                        match crate::worktree::list_open_prs(&repo_root) {
+                            Ok(prs) => {
+                                let items: Vec<(String, u32)> = prs
+                                    .into_iter()
+                                    .map(|p| (p.branch, p.number))
+                                    .collect();
+                                let _ = tx.send(Event::PrsByRepoRefreshed { repo_root, items });
+                            }
+                            Err(e) => {
+                                tracing::warn!("pr-refresh: {repo_root}: {e}");
+                            }
+                        }
+                    }
+                });
+            }
         }
 
         // Tailnet peer discovery runs on a background task every 10 s
@@ -1381,6 +1437,9 @@ impl App {
             KeyCode::Char('p') if self.state.active_tab == Tab::Agents => {
                 self.open_pr_picker();
             }
+            KeyCode::Char('o') if self.state.active_tab == Tab::Agents => {
+                self.open_selected_pr();
+            }
             KeyCode::Char('e') if self.state.active_tab == Tab::Agents => {
                 // Expand / collapse subagents inline under the selected main.
                 // No-op on subagent cards (you can only toggle from the parent).
@@ -1747,6 +1806,37 @@ impl App {
         tokio::task::spawn_blocking(move || {
             let result = crate::worktree::list_open_prs(&cwd);
             let _ = tx.send(Event::PrPickerLoaded { cwd, result });
+        });
+    }
+
+    /// Open the GitHub PR for the selected agent's branch in the user's
+    /// browser via `gh pr view <num> --web`. The number comes from the
+    /// background-refreshed cache (the same data that powers the `#NNNN`
+    /// badge), so this is a no-op when the badge is absent — we surface
+    /// a brief tmux message instead of silently swallowing the keypress.
+    fn open_selected_pr(&mut self) {
+        let Some(session) = self.state.selected_session() else { return };
+        let cwd = session.cwd.clone();
+        let pr = self.state.pr_number_for(
+            session.repo_root.as_deref(),
+            session.branch.as_deref(),
+        );
+        let Some(number) = pr else {
+            tmux::display_message("no open PR for this branch");
+            return;
+        };
+        if !crate::worktree::has_gh() {
+            tmux::display_message("`gh` CLI not found");
+            return;
+        }
+        std::thread::spawn(move || {
+            let status = std::process::Command::new("gh")
+                .args(["pr", "view", &number.to_string(), "--web"])
+                .current_dir(&cwd)
+                .status();
+            if let Err(e) = status {
+                tmux::display_message(&format!("gh pr view: {e}"));
+            }
         });
     }
 
