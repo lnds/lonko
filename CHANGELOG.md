@@ -1,3 +1,9 @@
+## v0.23.0 (2026-05-02)
+
+### Feat
+
+- **ui**: show open-PR badge on agent cards with `o` to open
+
 ## v0.22.5 (2026-05-01)
 
 ### Refactor
