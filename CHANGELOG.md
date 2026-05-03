@@ -1,3 +1,9 @@
+## v0.24.0 (2026-05-02)
+
+### Feat
+
+- **ui**: keep PR badge with blinking `M` after merge
+
 ## v0.23.0 (2026-05-02)
 
 ### Feat
