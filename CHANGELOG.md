@@ -1,3 +1,9 @@
+## v0.24.1 (2026-05-02)
+
+### Refactor
+
+- **ui**: move merged PR `M` to avatar column
+
 ## v0.24.0 (2026-05-02)
 
 ### Feat
