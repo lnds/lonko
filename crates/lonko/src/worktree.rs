@@ -197,6 +197,41 @@ pub fn run(cwd: &str, branch: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// List recently-merged PRs for the GitHub repo containing `cwd`.
+///
+/// Returns `(branch, number)` pairs. Used by the periodic poll so a card
+/// can keep showing its `#NNNN` (with a blinking `M`) after the PR is
+/// merged, instead of having the badge silently disappear.
+///
+/// Capped at 50 because the badge only matters while the agent is still
+/// around — older merges naturally fall out of the cache as the list
+/// scrolls past them, which is the right cleanup behavior.
+pub fn list_recent_merged_prs(cwd: &str) -> std::result::Result<Vec<(String, u32)>, String> {
+    let output = Command::new("gh")
+        .args([
+            "pr", "list",
+            "--state", "merged",
+            "--limit", "50",
+            "--json", "number,headRefName",
+        ])
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| format!("failed to run gh: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let first = stderr.lines().next().unwrap_or("gh pr list failed");
+        return Err(first.to_string());
+    }
+    #[derive(serde::Deserialize)]
+    struct Row {
+        number: u32,
+        #[serde(default, rename = "headRefName")] head_ref_name: String,
+    }
+    let rows: Vec<Row> = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("gh returned malformed JSON: {e}"))?;
+    Ok(rows.into_iter().map(|r| (r.head_ref_name, r.number)).collect())
+}
+
 /// List all open PRs for the GitHub repo containing `cwd` via `gh`.
 ///
 /// Requires `gh` to be installed and authenticated. Returns the error

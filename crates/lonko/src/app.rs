@@ -319,7 +319,7 @@ impl App {
         let remote_sep_flags =
             ui::list::compute_remote_sep_flags(&visible, self.state.remote_enabled);
         let (scroll, cards_visible) = ui::list::compute_scroll(
-            &visible, self.state.selected, list_h, &header_flags, &collapsed_flags, &remote_sep_flags, &self.state.bookmarks,
+            &visible, self.state.selected, list_h, &header_flags, &collapsed_flags, &remote_sep_flags, &self.state,
         );
 
         // Linear scan to find which card was clicked based on row offset from y=3.
@@ -350,7 +350,11 @@ impl App {
                 }
                 y_acc += hdr_h;
             }
-            let ch = ui::list::card_height(s, &self.state.bookmarks);
+            let ch = ui::list::card_height(
+                s,
+                &self.state.bookmarks,
+                ui::list::pr_info_for_session(&self.state, s),
+            );
             if click_y >= y_acc && click_y < y_acc + ch {
                 card_idx = Some(i);
                 break;
@@ -882,8 +886,9 @@ impl App {
                 }
             }
             Event::PrsByRepoRefreshed { repo_root, items } => {
-                let map: std::collections::HashMap<String, u32> = items.into_iter().collect();
-                self.state.pr_numbers_by_repo.insert(repo_root, map);
+                let map: std::collections::HashMap<String, crate::state::PrInfo> =
+                    items.into_iter().collect();
+                self.state.pr_infos_by_repo.insert(repo_root, map);
             }
         }
         Ok(false)
@@ -1005,16 +1010,45 @@ impl App {
                         return;
                     }
                     for repo_root in repos {
+                        // Two queries per repo: open PRs (for the live `#NNNN`
+                        // badge) and recently-merged PRs (so the badge can stay
+                        // up with a blinking `M` after merge instead of silently
+                        // disappearing). Merged loses to open if both report the
+                        // same branch — open is the more current truth.
+                        let mut items: Vec<(String, crate::state::PrInfo)> = Vec::new();
+                        match crate::worktree::list_recent_merged_prs(&repo_root) {
+                            Ok(merged) => {
+                                for (branch, number) in merged {
+                                    items.push((branch, crate::state::PrInfo {
+                                        number,
+                                        status: crate::state::PrMergeStatus::Merged,
+                                    }));
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("pr-refresh merged {repo_root}: {e}");
+                            }
+                        }
                         match crate::worktree::list_open_prs(&repo_root) {
                             Ok(prs) => {
-                                let items: Vec<(String, u32)> = prs
-                                    .into_iter()
-                                    .map(|p| (p.branch, p.number))
-                                    .collect();
+                                let open_branches: std::collections::HashSet<String> =
+                                    prs.iter().map(|p| p.branch.clone()).collect();
+                                items.retain(|(b, _)| !open_branches.contains(b));
+                                for p in prs {
+                                    items.push((p.branch, crate::state::PrInfo {
+                                        number: p.number,
+                                        status: crate::state::PrMergeStatus::Open,
+                                    }));
+                                }
                                 let _ = tx.send(Event::PrsByRepoRefreshed { repo_root, items });
                             }
                             Err(e) => {
-                                tracing::warn!("pr-refresh: {repo_root}: {e}");
+                                tracing::warn!("pr-refresh open {repo_root}: {e}");
+                                // Still publish merged-only data so the M badge
+                                // can keep working even if the open query failed.
+                                if !items.is_empty() {
+                                    let _ = tx.send(Event::PrsByRepoRefreshed { repo_root, items });
+                                }
                             }
                         }
                     }
@@ -1817,14 +1851,15 @@ impl App {
     fn open_selected_pr(&mut self) {
         let Some(session) = self.state.selected_session() else { return };
         let cwd = session.cwd.clone();
-        let pr = self.state.pr_number_for(
+        let pr = self.state.pr_info_for(
             session.repo_root.as_deref(),
             session.branch.as_deref(),
         );
-        let Some(number) = pr else {
-            tmux::display_message("no open PR for this branch");
+        let Some(info) = pr else {
+            tmux::display_message("no PR for this branch");
             return;
         };
+        let number = info.number;
         if !crate::worktree::has_gh() {
             tmux::display_message("`gh` CLI not found");
             return;

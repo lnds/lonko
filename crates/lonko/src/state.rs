@@ -486,11 +486,31 @@ pub struct AppState {
     /// PRs for the repo of the selected agent so the user can pick one
     /// to review in a fresh worktree.
     pub pr_picker: PrPickerState,
-    /// Open-PR numbers per repo, keyed by `repo_root` → branch → PR number.
-    /// Refreshed in the background every ~30s by a `gh pr list` call per
-    /// unique local `repo_root`. Drives the `#NNNN` badge on agent cards;
-    /// absence means "no open PR for that branch" (or `gh` unavailable).
-    pub pr_numbers_by_repo: HashMap<String, HashMap<String, u32>>,
+    /// PR info per repo, keyed by `repo_root` → branch → PrInfo.
+    /// Refreshed in the background every ~30s via `gh pr list` per unique
+    /// local `repo_root`, including both open and recently-merged PRs.
+    /// Drives the `#NNNN` badge on agent cards; merged PRs additionally
+    /// render a blinking `M` underneath. Absence means "no PR for that
+    /// branch" (or `gh` unavailable).
+    pub pr_infos_by_repo: HashMap<String, HashMap<String, PrInfo>>,
+}
+
+/// Merge state of a PR as last observed by the periodic `gh pr list` poll.
+/// `Closed` is folded into `Merged = false` and never lands in the cache,
+/// so the only two states the UI cares about are open and merged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrMergeStatus {
+    Open,
+    Merged,
+}
+
+/// PR badge data attached to an agent card. The number stays visible after
+/// merge so the user can confirm the merge happened; the status flips the
+/// rendering (a blinking `M` appears below the `#NNNN`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrInfo {
+    pub number: u32,
+    pub status: PrMergeStatus,
 }
 
 /// One row in the PR picker list. Mirrors the subset of `gh pr list --json`
@@ -647,7 +667,7 @@ impl Default for AppState {
             remote_enabled: false,
             remote_poll_ticks: 300, // 30s default; matches RemoteConfig::default
             pr_picker: PrPickerState::default(),
-            pr_numbers_by_repo: HashMap::new(),
+            pr_infos_by_repo: HashMap::new(),
         }
     }
 }
@@ -840,13 +860,13 @@ impl AppState {
             .count()
     }
 
-    /// Look up the open-PR number for a `(repo_root, branch)` pair, if the
+    /// Look up the PR info for a `(repo_root, branch)` pair, if the
     /// background refresh has seen one. Returns `None` when either side is
-    /// missing, the repo hasn't been polled yet, or no open PR exists.
-    pub fn pr_number_for(&self, repo_root: Option<&str>, branch: Option<&str>) -> Option<u32> {
+    /// missing, the repo hasn't been polled yet, or no PR exists.
+    pub fn pr_info_for(&self, repo_root: Option<&str>, branch: Option<&str>) -> Option<PrInfo> {
         let root = repo_root?;
         let branch = branch?;
-        self.pr_numbers_by_repo.get(root)?.get(branch).copied()
+        self.pr_infos_by_repo.get(root)?.get(branch).copied()
     }
 
     pub fn visible_len(&self) -> usize {
@@ -3438,34 +3458,42 @@ mod tests {
     }
 
     #[test]
-    fn pr_number_for_returns_known_pair() {
+    fn pr_info_for_returns_known_pair() {
         let mut state = AppState::default();
         let mut prs = HashMap::new();
-        prs.insert("feat/badge".to_string(), 42u32);
-        prs.insert("fix/oops".to_string(), 7u32);
-        state.pr_numbers_by_repo.insert("/repo".to_string(), prs);
-        assert_eq!(state.pr_number_for(Some("/repo"), Some("feat/badge")), Some(42));
-        assert_eq!(state.pr_number_for(Some("/repo"), Some("fix/oops")), Some(7));
+        prs.insert("feat/badge".to_string(), PrInfo { number: 42, status: PrMergeStatus::Open });
+        prs.insert("fix/oops".to_string(), PrInfo { number: 7, status: PrMergeStatus::Merged });
+        state.pr_infos_by_repo.insert("/repo".to_string(), prs);
+        assert_eq!(
+            state.pr_info_for(Some("/repo"), Some("feat/badge")),
+            Some(PrInfo { number: 42, status: PrMergeStatus::Open }),
+        );
+        assert_eq!(
+            state.pr_info_for(Some("/repo"), Some("fix/oops")),
+            Some(PrInfo { number: 7, status: PrMergeStatus::Merged }),
+        );
     }
 
     #[test]
-    fn pr_number_for_is_none_when_inputs_missing() {
+    fn pr_info_for_is_none_when_inputs_missing() {
         let mut state = AppState::default();
-        state
-            .pr_numbers_by_repo
-            .insert("/repo".to_string(), HashMap::from([("main".to_string(), 1u32)]));
-        assert_eq!(state.pr_number_for(None, Some("main")), None);
-        assert_eq!(state.pr_number_for(Some("/repo"), None), None);
-        assert_eq!(state.pr_number_for(None, None), None);
+        state.pr_infos_by_repo.insert(
+            "/repo".to_string(),
+            HashMap::from([("main".to_string(), PrInfo { number: 1, status: PrMergeStatus::Open })]),
+        );
+        assert_eq!(state.pr_info_for(None, Some("main")), None);
+        assert_eq!(state.pr_info_for(Some("/repo"), None), None);
+        assert_eq!(state.pr_info_for(None, None), None);
     }
 
     #[test]
-    fn pr_number_for_is_none_for_unknown_repo_or_branch() {
+    fn pr_info_for_is_none_for_unknown_repo_or_branch() {
         let mut state = AppState::default();
-        state
-            .pr_numbers_by_repo
-            .insert("/repo".to_string(), HashMap::from([("main".to_string(), 1u32)]));
-        assert_eq!(state.pr_number_for(Some("/other"), Some("main")), None);
-        assert_eq!(state.pr_number_for(Some("/repo"), Some("nonexistent")), None);
+        state.pr_infos_by_repo.insert(
+            "/repo".to_string(),
+            HashMap::from([("main".to_string(), PrInfo { number: 1, status: PrMergeStatus::Open })]),
+        );
+        assert_eq!(state.pr_info_for(Some("/other"), Some("main")), None);
+        assert_eq!(state.pr_info_for(Some("/repo"), Some("nonexistent")), None);
     }
 }

@@ -59,12 +59,13 @@ pub enum Event {
         cwd: String,
         result: Result<Vec<crate::state::PrPickItem>, String>,
     },
-    /// Periodic refresh of open-PR numbers for one repo. Fired ~every 30 s
-    /// per unique local `repo_root`; populates the cache used to badge
-    /// agent cards with `#NNNN`. Errors are dropped (logged), so the cache
-    /// simply stays stale instead of clearing on transient `gh` failures.
+    /// Periodic refresh of PR info for one repo. Fired ~every 30 s per
+    /// unique local `repo_root`; populates the cache used to badge agent
+    /// cards with `#NNNN` (plus a blinking `M` once merged). Errors are
+    /// dropped (logged), so the cache simply stays stale instead of
+    /// clearing on transient `gh` failures.
     PrsByRepoRefreshed {
         repo_root: String,
-        items: Vec<(String, u32)>,
+        items: Vec<(String, crate::state::PrInfo)>,
     },
 }

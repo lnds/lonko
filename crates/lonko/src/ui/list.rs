@@ -7,7 +7,7 @@ use ratatui::{
 };
 use std::collections::HashMap;
 use unicode_width::UnicodeWidthStr;
-use crate::state::{AppState, Session, SessionStatus};
+use crate::state::{AppState, PrInfo, PrMergeStatus, Session, SessionStatus};
 
 const SPINNER: &[&str] = throbber_widgets_tui::BRAILLE_SIX_DOUBLE.symbols;
 
@@ -107,16 +107,33 @@ pub(crate) const GROUP_HEADER_HEIGHT: u16 = 1;
 /// is enabled and at least one local agent is visible above it.
 pub(crate) const REMOTE_SEP_HEIGHT: u16 = 1;
 
-/// Card height for a session: 5 lines (6 when a bookmark note is shown).
-/// Inline-expanded subagent rows are compact — 2 lines.
-pub(crate) fn card_height(session: &Session, bookmarks: &HashMap<String, String>) -> u16 {
+/// Card height for a session: 5 lines, plus 1 for a bookmark note and/or
+/// a merged-PR `M` badge. Inline-expanded subagent rows are compact — 2
+/// lines and don't carry either decoration.
+pub(crate) fn card_height(
+    session: &Session,
+    bookmarks: &HashMap<String, String>,
+    pr_info: Option<PrInfo>,
+) -> u16 {
     if session.is_subagent() {
-        SUBAGENT_CARD_HEIGHT
-    } else if bookmarks.contains_key(&session.cwd) {
-        CARD_HEIGHT + 1
-    } else {
-        CARD_HEIGHT
+        return SUBAGENT_CARD_HEIGHT;
     }
+    let mut h = CARD_HEIGHT;
+    if bookmarks.contains_key(&session.cwd) {
+        h += 1;
+    }
+    if matches!(pr_info, Some(PrInfo { status: PrMergeStatus::Merged, .. })) {
+        h += 1;
+    }
+    h
+}
+
+/// Look up the PR info for a card, threaded through the layout helpers
+/// so `card_height` can grow the row by one when a merged-PR `M` badge
+/// will render. Pulled out of `AppState::pr_info_for` to keep the layout
+/// callers from having to thread `repo_root`/`branch` themselves.
+pub(crate) fn pr_info_for_session(state: &AppState, session: &Session) -> Option<PrInfo> {
+    state.pr_info_for(session.repo_root.as_deref(), session.branch.as_deref())
 }
 
 /// For each session in `visible`, whether a group header should be drawn
@@ -272,14 +289,15 @@ fn slot_height(
     header_flags: &[bool],
     collapsed_flags: &[bool],
     remote_sep_flags: &[bool],
-    bookmarks: &HashMap<String, String>,
+    state: &AppState,
 ) -> u16 {
     let sep = if remote_sep_flags[idx] { REMOTE_SEP_HEIGHT } else { 0 };
     let hdr = if header_flags[idx] { GROUP_HEADER_HEIGHT } else { 0 };
     if collapsed_flags[idx] {
         return sep + hdr;
     }
-    sep + hdr + card_height(visible[idx], bookmarks)
+    let session = visible[idx];
+    sep + hdr + card_height(session, &state.bookmarks, pr_info_for_session(state, session))
 }
 
 /// Compute how many cards fit from `start` in `sessions` given `avail` lines,
@@ -291,7 +309,7 @@ pub(crate) fn cards_fitting(
     header_flags: &[bool],
     collapsed_flags: &[bool],
     remote_sep_flags: &[bool],
-    bookmarks: &HashMap<String, String>,
+    state: &AppState,
 ) -> usize {
     if avail == 0 {
         return 0;
@@ -299,7 +317,7 @@ pub(crate) fn cards_fitting(
     let mut used = 0u16;
     let mut count = 0;
     for i in start..sessions.len() {
-        let h = slot_height(sessions, i, header_flags, collapsed_flags, remote_sep_flags, bookmarks)
+        let h = slot_height(sessions, i, header_flags, collapsed_flags, remote_sep_flags, state)
             + if count > 0 { SEP_HEIGHT } else { 0 };
         if used + h > avail { break; }
         used += h;
@@ -318,13 +336,13 @@ pub(crate) fn compute_scroll(
     header_flags: &[bool],
     collapsed_flags: &[bool],
     remote_sep_flags: &[bool],
-    bookmarks: &HashMap<String, String>,
+    state: &AppState,
 ) -> (usize, usize) {
     let total = visible.len();
     if total == 0 || avail == 0 {
         return (0, 0);
     }
-    let approx = cards_fitting(visible, 0, avail, header_flags, collapsed_flags, remote_sep_flags, bookmarks).min(total);
+    let approx = cards_fitting(visible, 0, avail, header_flags, collapsed_flags, remote_sep_flags, state).min(total);
     let half = approx / 2;
     let scroll = if selected < half {
         0
@@ -333,7 +351,7 @@ pub(crate) fn compute_scroll(
     } else {
         selected - half
     };
-    let cards_visible = cards_fitting(visible, scroll, avail, header_flags, collapsed_flags, remote_sep_flags, bookmarks).min(total - scroll);
+    let cards_visible = cards_fitting(visible, scroll, avail, header_flags, collapsed_flags, remote_sep_flags, state).min(total - scroll);
     (scroll, cards_visible)
 }
 
@@ -413,7 +431,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let dup_suffixes = compute_dup_suffixes(&visible);
 
     let (scroll, cards_visible) = compute_scroll(
-        &visible, state.selected, list_area.height, &header_flags, &collapsed_flags, &remote_sep_flags, &state.bookmarks,
+        &visible, state.selected, list_area.height, &header_flags, &collapsed_flags, &remote_sep_flags, state,
     );
     let page = &visible[scroll..scroll + cards_visible];
 
@@ -511,16 +529,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         let subagents_expanded = state.expanded_subagents.contains(&session.id);
         let dup_suffix = dup_suffixes.get(global_idx).and_then(|o| o.as_deref());
         // Remote agents have no `repo_root` populated (gh runs locally and
-        // can't see the remote repo's PR list anyway), so `pr_number_for`
+        // can't see the remote repo's PR list anyway), so `pr_info_for`
         // naturally returns `None` for them — no extra guard needed here.
-        let pr_number = state.pr_number_for(
-            session.repo_root.as_deref(),
-            session.branch.as_deref(),
-        );
+        let pr_info = pr_info_for_session(state, session);
         render_session_card(frame, chunks[chunk_idx], session, CardCtx {
             selected, focused, tick: state.tick, position, icon, bookmark_note,
             worktree_input, bookmark_input, subagent_count, subagents_expanded,
-            dup_suffix, pr_number,
+            dup_suffix, pr_info,
         });
     }
 
@@ -576,7 +591,7 @@ fn build_card_constraints(
             // Collapsed: no card, only header
             None
         } else {
-            let mut ch = card_height(s, &state.bookmarks);
+            let mut ch = card_height(s, &state.bookmarks, pr_info_for_session(state, s));
             if global_idx == state.selected && state.bookmark.mode
                 && !state.bookmarks.contains_key(&s.cwd)
             {
@@ -650,17 +665,18 @@ struct CardCtx<'a> {
     /// Disambiguating suffix appended to the title when another visible
     /// agent shares the same display name (e.g. two agents on `main`).
     dup_suffix: Option<&'a str>,
-    /// Open-PR number for the agent's `(repo_root, branch)`, if known.
-    /// Renders as a `#NNNN` badge on the model line; `None` shows nothing
-    /// (no badge — absence is the "no open PR" signal).
-    pr_number: Option<u32>,
+    /// PR info for the agent's `(repo_root, branch)`, if known.
+    /// Open PRs render as a `#NNNN` badge on the model line; merged PRs
+    /// keep that badge and add a blinking `M` underneath. `None` shows
+    /// nothing — absence is the "no PR for this branch" signal.
+    pr_info: Option<PrInfo>,
 }
 
 fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: CardCtx<'_>) {
     let CardCtx {
         selected, focused, tick, position, icon, bookmark_note,
         worktree_input, bookmark_input, subagent_count, subagents_expanded,
-        dup_suffix, pr_number,
+        dup_suffix, pr_info,
     } = ctx;
     if session.is_subagent() {
         render_subagent_row(frame, area, session, selected, focused);
@@ -903,25 +919,56 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
     let model_w = UnicodeWidthStr::width(model_str.as_str());
     let ctx_label = format!("{}K ctx", ctx_k);
     let ctx_w = UnicodeWidthStr::width(ctx_label.as_str());
-    let pr_badge = pr_number.map(|n| format!("#{n}"));
+    let pr_badge = pr_info.map(|p| format!("#{}", p.number));
     let pr_w = pr_badge.as_deref().map(UnicodeWidthStr::width).unwrap_or(0);
     let baseline = 4 + model_w + 2 + ctx_w; // indent + model + "  " + ctx
     let with_badge = baseline + pr_w + 2; // additional "#NNNN  "
+    let badge_fits = pr_badge.is_some() && with_badge <= area.width as usize;
+    let badge_color = if matches!(pr_info, Some(PrInfo { status: PrMergeStatus::Merged, .. })) {
+        // Dim a merged badge so the blinking `M` below it carries the
+        // urgency instead of the number itself competing for attention.
+        SUBTLE
+    } else {
+        ORANGE
+    };
     let mut info_spans = vec![
         Span::raw(indent),
         Span::styled(model_str, Style::default().fg(SUBTLE)),
     ];
     if let Some(badge) = pr_badge
-        && with_badge <= area.width as usize
+        && badge_fits
     {
         info_spans.push(Span::raw("  "));
         info_spans.push(Span::styled(
             badge,
-            Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+            Style::default().fg(badge_color).add_modifier(Modifier::BOLD),
         ));
     }
     info_spans.push(Span::styled(format!("  {}", ctx_label), Style::default().fg(DIM)));
     let info_line = Line::from(info_spans);
+
+    // Optional line 4b: a blinking `M` aligned beneath the `#` of the PR
+    // badge, signaling the PR was merged. Only emitted when the badge
+    // actually fit on line 4 — otherwise there's nothing for the `M` to
+    // sit under, and a stray `M` floating in the middle of the card
+    // would just be confusing. The card height grew by 1 in
+    // `card_height` precisely to make room for this row.
+    let merged_line = if matches!(pr_info, Some(PrInfo { status: PrMergeStatus::Merged, .. }))
+        && badge_fits
+    {
+        // Blink at ~1Hz: tick is ~10/s, so a half-period of 5 ticks gives
+        // a clearly perceptible flash without strobing the eye.
+        let phase = (tick / 5) % 2;
+        let m_color = if phase == 0 { GREEN } else { TEAL };
+        // Pad to the column where `#` lives on line 4.
+        let pad = " ".repeat(4 + model_w + 2);
+        Some(Line::from(vec![
+            Span::raw(pad),
+            Span::styled("M", Style::default().fg(m_color).add_modifier(Modifier::BOLD)),
+        ]))
+    } else {
+        None
+    };
 
     // Line 5: context progress bar
     let inner_width = area.width.saturating_sub(3) as usize;
@@ -975,7 +1022,12 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
     if let Some(bm) = bookmark_line {
         content.push(bm);
     }
-    content.extend([status_line, info_line, last_line]);
+    content.push(status_line);
+    content.push(info_line);
+    if let Some(m_line) = merged_line {
+        content.push(m_line);
+    }
+    content.push(last_line);
 
     // Left-only border: colored stripe acting as visual identity + selection indicator.
     // No box border — cleaner look, cards are separated by blank lines.
