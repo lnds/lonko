@@ -107,13 +107,12 @@ pub(crate) const GROUP_HEADER_HEIGHT: u16 = 1;
 /// is enabled and at least one local agent is visible above it.
 pub(crate) const REMOTE_SEP_HEIGHT: u16 = 1;
 
-/// Card height for a session: 5 lines, plus 1 for a bookmark note and/or
-/// a merged-PR `M` badge. Inline-expanded subagent rows are compact — 2
-/// lines and don't carry either decoration.
+/// Card height for a session: 5 lines, plus 1 for a bookmark note.
+/// Inline-expanded subagent rows are compact — 2 lines without decoration.
 pub(crate) fn card_height(
     session: &Session,
     bookmarks: &HashMap<String, String>,
-    pr_info: Option<PrInfo>,
+    _pr_info: Option<PrInfo>,
 ) -> u16 {
     if session.is_subagent() {
         return SUBAGENT_CARD_HEIGHT;
@@ -122,16 +121,12 @@ pub(crate) fn card_height(
     if bookmarks.contains_key(&session.cwd) {
         h += 1;
     }
-    if matches!(pr_info, Some(PrInfo { status: PrMergeStatus::Merged, .. })) {
-        h += 1;
-    }
     h
 }
 
-/// Look up the PR info for a card, threaded through the layout helpers
-/// so `card_height` can grow the row by one when a merged-PR `M` badge
-/// will render. Pulled out of `AppState::pr_info_for` to keep the layout
-/// callers from having to thread `repo_root`/`branch` themselves.
+/// Look up the PR info for a card. Pulled out of `AppState::pr_info_for`
+/// to keep the layout callers from having to thread `repo_root`/`branch`
+/// themselves.
 pub(crate) fn pr_info_for_session(state: &AppState, session: &Session) -> Option<PrInfo> {
     state.pr_info_for(session.repo_root.as_deref(), session.branch.as_deref())
 }
@@ -667,8 +662,9 @@ struct CardCtx<'a> {
     dup_suffix: Option<&'a str>,
     /// PR info for the agent's `(repo_root, branch)`, if known.
     /// Open PRs render as a `#NNNN` badge on the model line; merged PRs
-    /// keep that badge and add a blinking `M` underneath. `None` shows
-    /// nothing — absence is the "no PR for this branch" signal.
+    /// keep that badge (dimmed) and add a blinking `M` in the avatar
+    /// column on the status line. `None` shows nothing — absence is the
+    /// "no PR for this branch" signal.
     pr_info: Option<PrInfo>,
 }
 
@@ -875,7 +871,12 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
         })
     };
 
-    // Line 3: spinner (when running) + status label + elapsed
+    // Line 3: spinner (when running) + status label + elapsed.
+    // The leading 4-col gutter doubles as the merged-PR badge slot:
+    // when the agent's PR is merged we render a blinking `M` at col 1,
+    // visually stacked under the avatar (line 1) and position number
+    // (line 2). Keeps the merge signal in the left-column "identity"
+    // strip instead of floating mid-card.
     let is_running = matches!(&session.status, SessionStatus::Running | SessionStatus::RunningTool(_));
     let spinner_span = if is_running {
         Span::styled(
@@ -885,8 +886,20 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
     } else {
         Span::raw("")
     };
+    let lead_span = if matches!(pr_info, Some(PrInfo { status: PrMergeStatus::Merged, .. })) {
+        // Blink at ~1Hz: tick is ~10/s, so a half-period of 5 ticks
+        // gives a clearly perceptible flash without strobing the eye.
+        let phase = (tick / 5) % 2;
+        let m_color = if phase == 0 { GREEN } else { TEAL };
+        Span::styled(
+            " M  ".to_string(),
+            Style::default().fg(m_color).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::raw(indent)
+    };
     let mut status_spans = vec![
-        Span::raw(indent),
+        lead_span,
         spinner_span,
         Span::styled(session.status.label(), Style::default().fg(status_color)),
         Span::styled(
@@ -947,29 +960,6 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
     info_spans.push(Span::styled(format!("  {}", ctx_label), Style::default().fg(DIM)));
     let info_line = Line::from(info_spans);
 
-    // Optional line 4b: a blinking `M` aligned beneath the `#` of the PR
-    // badge, signaling the PR was merged. Only emitted when the badge
-    // actually fit on line 4 — otherwise there's nothing for the `M` to
-    // sit under, and a stray `M` floating in the middle of the card
-    // would just be confusing. The card height grew by 1 in
-    // `card_height` precisely to make room for this row.
-    let merged_line = if matches!(pr_info, Some(PrInfo { status: PrMergeStatus::Merged, .. }))
-        && badge_fits
-    {
-        // Blink at ~1Hz: tick is ~10/s, so a half-period of 5 ticks gives
-        // a clearly perceptible flash without strobing the eye.
-        let phase = (tick / 5) % 2;
-        let m_color = if phase == 0 { GREEN } else { TEAL };
-        // Pad to the column where `#` lives on line 4.
-        let pad = " ".repeat(4 + model_w + 2);
-        Some(Line::from(vec![
-            Span::raw(pad),
-            Span::styled("M", Style::default().fg(m_color).add_modifier(Modifier::BOLD)),
-        ]))
-    } else {
-        None
-    };
-
     // Line 5: context progress bar
     let inner_width = area.width.saturating_sub(3) as usize;
     let filled = ((session.context_pct() * inner_width as f64) as usize).min(inner_width);
@@ -1024,9 +1014,6 @@ fn render_session_card(frame: &mut Frame, area: Rect, session: &Session, ctx: Ca
     }
     content.push(status_line);
     content.push(info_line);
-    if let Some(m_line) = merged_line {
-        content.push(m_line);
-    }
     content.push(last_line);
 
     // Left-only border: colored stripe acting as visual identity + selection indicator.
