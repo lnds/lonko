@@ -1,3 +1,9 @@
+## v0.24.2 (2026-05-03)
+
+### Fix
+
+- **bookmarks**: capture cwd at modal open to avoid lost labels
+
 ## v0.24.1 (2026-05-02)
 
 ### Refactor
