@@ -1311,8 +1311,7 @@ impl App {
     fn dispatch_modal_key(&mut self, code: KeyCode, ctrl: bool) -> Option<bool> {
         if self.state.bookmark.mode {
             if let Some(note) = self.state.apply_bookmark_key(code, ctrl)
-                && let Some(session) = self.state.selected_session() {
-                    let cwd = session.cwd.clone();
+                && let Some(cwd) = self.state.bookmark.cwd.take() {
                     if note.is_empty() {
                         self.state.bookmarks.remove(&cwd);
                     } else {
@@ -1462,6 +1461,7 @@ impl App {
                         .get(&cwd)
                         .cloned()
                         .unwrap_or_default();
+                    self.state.bookmark.cwd = Some(cwd);
                     self.state.bookmark.mode = true;
                 }
             }

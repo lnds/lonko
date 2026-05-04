@@ -393,6 +393,10 @@ pub struct BookmarkModeState {
     pub mode: bool,
     /// Note text being edited.
     pub input: String,
+    /// The cwd whose bookmark is being edited. Captured when the modal
+    /// opens so concurrent list reordering or session removal between
+    /// keystrokes cannot misroute the saved note.
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -1155,6 +1159,7 @@ impl AppState {
             KeyCode::Esc => {
                 self.bookmark.mode = false;
                 self.bookmark.input.clear();
+                self.bookmark.cwd = None;
             }
             KeyCode::Enter => {
                 let note = self.bookmark.input.trim().to_string();
@@ -1166,6 +1171,7 @@ impl AppState {
             KeyCode::Char('c') if ctrl => {
                 self.bookmark.mode = false;
                 self.bookmark.input.clear();
+                self.bookmark.cwd = None;
             }
             KeyCode::Char(c) => { self.bookmark.input.push(c); }
             _ => {}

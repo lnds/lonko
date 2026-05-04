@@ -515,7 +515,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         } else {
             None
         };
-        let bookmark_input = if selected && state.bookmark.mode {
+        let bookmark_input = if state.bookmark.mode
+            && state.bookmark.cwd.as_deref() == Some(session.cwd.as_str())
+        {
             Some(state.bookmark.input.as_str())
         } else {
             None
@@ -587,7 +589,8 @@ fn build_card_constraints(
             None
         } else {
             let mut ch = card_height(s, &state.bookmarks, pr_info_for_session(state, s));
-            if global_idx == state.selected && state.bookmark.mode
+            if state.bookmark.mode
+                && state.bookmark.cwd.as_deref() == Some(s.cwd.as_str())
                 && !state.bookmarks.contains_key(&s.cwd)
             {
                 ch += 1;
