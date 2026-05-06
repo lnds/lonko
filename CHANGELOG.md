@@ -1,3 +1,9 @@
+## v0.24.3 (2026-05-06)
+
+### Fix
+
+- **ui**: hide panel after activating a tmux session
+
 ## v0.24.2 (2026-05-03)
 
 ### Fix
