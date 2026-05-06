@@ -13,12 +13,14 @@ use crate::control::tmux;
 
 impl App {
     /// Focus the selected tmux session (Sessions tab), optionally at a specific window.
+    /// Hides the panel after the switch so behavior matches Agents-tab activation.
     pub(super) fn focus_tmux_session(&mut self) {
         let Some(session) = self.state.selected_tmux_session() else { return };
         let name = session.name.clone();
         if let Some(win_idx) = self.state.tmux_window_cursor
             && let Some(window) = session.windows.get(win_idx) {
                 let _ = tmux::focus_session_window(&name, window.index);
+                self.hide_panel();
                 return;
             }
         let mut cmd = std::process::Command::new("tmux");
@@ -28,6 +30,7 @@ impl App {
         }
         cmd.args(["-t", &name]).stderr(std::process::Stdio::null());
         let _ = cmd.status();
+        self.hide_panel();
     }
 
     pub(super) fn focus_selected(&mut self) {
