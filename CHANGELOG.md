@@ -1,3 +1,9 @@
+## v0.25.0 (2026-05-07)
+
+### Feat
+
+- **channel**: chat with agents via Claude Code Channels (v1)
+
 ## v0.24.3 (2026-05-06)
 
 ### Fix
