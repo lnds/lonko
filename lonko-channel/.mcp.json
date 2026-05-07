@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "lonko": {
+      "command": "node",
+      "args": ["./dist/index.js"]
+    }
+  }
+}

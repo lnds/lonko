@@ -1,3 +1,4 @@
+mod chat;
 mod detail;
 mod footer;
 mod header;
@@ -53,5 +54,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     if state.pr_picker.mode {
         pr_picker::render(frame, state);
+    }
+
+    if state.chat_view.is_some() {
+        chat::render(frame, state);
     }
 }

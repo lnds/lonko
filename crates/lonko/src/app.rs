@@ -11,11 +11,12 @@ use crate::{
     control::{ghostty, tmux, tmux::tmux_session_for_pane},
     event::Event,
     focus,
-    sources::{hooks, lifecycle, transcript, tmux_scanner},
+    sources::{chat, hooks, lifecycle, transcript, tmux_scanner},
     state::{AppState, KeyOutcome, Session, SessionStatus, Tab},
     ui,
 };
 
+mod chat_view;
 mod inflight;
 mod navigate;
 mod panel;
@@ -144,6 +145,10 @@ pub struct App {
     /// Set this to `now + 500ms` at the start of every move op; the
     /// alone-detection short-circuits while it is in the future.
     panel_moving_until: Option<std::time::Instant>,
+    /// Live registry of `lonko-channel` plugin connections, keyed by
+    /// PPID (= the Claude Code session's PID). Used to push `chat.send`
+    /// frames into a specific agent's running channel plugin.
+    chat_registry: chat::Registry,
 }
 
 impl App {
@@ -172,6 +177,7 @@ impl App {
             remote_bridge_starting: std::collections::HashSet::new(),
             remote_online_hosts: std::collections::HashSet::new(),
             panel_moving_until: None,
+            chat_registry: chat::Registry::new(),
         }
     }
 
@@ -250,6 +256,10 @@ impl App {
 
         // Spawn the Unix socket listener for hook events
         hooks::spawn_listener(tx.clone())
+            .map_err(|e| color_eyre::eyre::eyre!(e))?;
+
+        // Spawn the chat socket listener (lonko-channel plugin connections)
+        chat::spawn_listener(tx.clone(), self.chat_registry.clone())
             .map_err(|e| color_eyre::eyre::eyre!(e))?;
 
         loop {
@@ -890,6 +900,18 @@ impl App {
                     items.into_iter().collect();
                 self.state.pr_infos_by_repo.insert(repo_root, map);
             }
+            Event::ChatOnline { ppid, pid } => {
+                self.state.on_chat_online(ppid, pid);
+            }
+            Event::ChatOffline { ppid } => {
+                self.state.on_chat_offline(ppid);
+            }
+            Event::ChatReply { agent_id, text, in_reply_to } => {
+                self.state.on_chat_reply(&agent_id, text, in_reply_to);
+            }
+            Event::ChatAck { msg_id, status } => {
+                self.state.on_chat_ack(&msg_id, &status);
+            }
         }
         Ok(false)
     }
@@ -1360,6 +1382,14 @@ impl App {
             }
             return Some(false);
         }
+        if self.state.chat_view.is_some() {
+            // Ctrl-C still quits even with chat open.
+            if ctrl && matches!(code, KeyCode::Char('c')) {
+                return Some(true);
+            }
+            self.apply_chat_view_key(code);
+            return Some(false);
+        }
         None
     }
 
@@ -1391,6 +1421,9 @@ impl App {
             }
             KeyCode::Char('q') => { self.hide_panel(); }
             KeyCode::Char('c') if ctrl => return Ok(true),
+            KeyCode::Char('c') if self.state.active_tab == Tab::Agents => {
+                self.open_chat_for_selected();
+            }
             KeyCode::Char('j') | KeyCode::Down => self.navigate_by_tab(1),
             KeyCode::Char('k') | KeyCode::Up => self.navigate_by_tab(-1),
             KeyCode::Char('h') if self.state.active_tab == Tab::Agents => {

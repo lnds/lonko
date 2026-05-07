@@ -1,3 +1,4 @@
+pub mod chat;
 pub mod hooks;
 pub mod lifecycle;
 pub mod remote_bridge;

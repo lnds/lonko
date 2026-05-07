@@ -1,0 +1,20 @@
+{
+  "name": "lonko-channel",
+  "version": "0.1.0",
+  "description": "Claude Code channel plugin for the lonko TUI: bridges chat between the lonko daemon and the running Claude Code session over MCP.",
+  "private": true,
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

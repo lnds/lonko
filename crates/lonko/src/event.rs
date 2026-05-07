@@ -68,4 +68,18 @@ pub enum Event {
         repo_root: String,
         items: Vec<(String, crate::state::PrInfo)>,
     },
+    /// A `lonko-channel` plugin connected and announced its agent.
+    /// `ppid` matches the Claude Code session's PID we already track.
+    ChatOnline { ppid: u32, pid: u32 },
+    /// The `lonko-channel` plugin closed its connection.
+    ChatOffline { ppid: u32 },
+    /// Claude (running on the agent side) called the channel's `reply`
+    /// tool to send a message back to the lonko TUI.
+    ChatReply {
+        agent_id: String,
+        text: String,
+        in_reply_to: String,
+    },
+    /// The plugin acknowledged a `chat.send` frame the daemon emitted.
+    ChatAck { msg_id: String, status: String },
 }
