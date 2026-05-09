@@ -1,3 +1,9 @@
+## v0.25.1 (2026-05-09)
+
+### Fix
+
+- **chat**: wrap chat input across rows instead of overflowing
+
 ## v0.25.0 (2026-05-07)
 
 ### Feat
