@@ -8,8 +8,13 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::state::{AppState, ChatDirection, ChatLog};
+
+/// Maximum fraction of the chat overlay's inner height the input line is
+/// allowed to grow into when the user types more than fits on one row.
+const INPUT_MAX_FRACTION: u16 = 2;
 
 const BLUE: Color = Color::Rgb(122, 162, 247);
 const DIM: Color = Color::Rgb(86, 95, 137);
@@ -30,14 +35,39 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Vertical split: log area (rest), separator, input line.
+    let online = state.chat_online.contains(&view.agent_id);
+    let input_rows = wrapped_input_rows(&view.input, inner.width, inner.height, online);
+    // Vertical split: log area (rest), separator + input line(s).
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .constraints([Constraint::Min(1), Constraint::Length(1 + input_rows)])
         .split(inner);
 
     render_log(frame, chunks[0], state.chat_logs.get(&view.agent_id), view.scroll);
-    render_input(frame, chunks[1], &view.input, state.chat_online.contains(&view.agent_id));
+    render_input(frame, chunks[1], &view.input, online);
+}
+
+/// Number of rows the input text needs after soft-wrapping by display
+/// columns (prefix + body + cursor caret), capped to a fraction of the
+/// overlay's inner height so the log keeps room.
+fn wrapped_input_rows(input: &str, width: u16, inner_height: u16, online: bool) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+    let prefix_cols = prompt_label_cols(online);
+    let body_cols = UnicodeWidthStr::width(input);
+    let total = prefix_cols + body_cols + 1; // +1 for cursor caret
+    let needed = total.div_ceil(width as usize).max(1) as u16;
+    let cap = (inner_height / INPUT_MAX_FRACTION).max(1);
+    needed.min(cap)
+}
+
+fn prompt_label_cols(online: bool) -> usize {
+    UnicodeWidthStr::width(prompt_label(online))
+}
+
+fn prompt_label(online: bool) -> &'static str {
+    if online { "› " } else { "(offline) " }
 }
 
 fn render_log(frame: &mut Frame, area: Rect, log: Option<&ChatLog>, scroll: u16) {
@@ -76,9 +106,13 @@ fn render_log(frame: &mut Frame, area: Rect, log: Option<&ChatLog>, scroll: u16)
 }
 
 fn render_input(frame: &mut Frame, area: Rect, input: &str, online: bool) {
+    if area.height < 2 || area.width == 0 {
+        return;
+    }
+    let body_height = area.height - 1;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .constraints([Constraint::Length(1), Constraint::Length(body_height)])
         .split(area);
 
     let separator = Line::from(Span::styled(
@@ -93,14 +127,68 @@ fn render_input(frame: &mut Frame, area: Rect, input: &str, online: bool) {
         Style::default().fg(DIM)
     };
     let body_style = Style::default().fg(INPUT_COLOR);
+    let cursor_style = Style::default().fg(USER_COLOR);
 
-    let prompt_label = if online { "› " } else { "(offline) " };
-    let line = Line::from(vec![
-        Span::styled(prompt_label, prompt_style),
-        Span::styled(input.to_string(), body_style),
-        Span::styled("▏", Style::default().fg(USER_COLOR)),
-    ]);
-    frame.render_widget(Paragraph::new(line), chunks[1]);
+    let label = prompt_label(online);
+    let lines = wrap_input_lines(
+        input,
+        chunks[1].width,
+        Span::styled(label, prompt_style),
+        body_style,
+        Span::styled("▏", cursor_style),
+    );
+
+    // Pin the bottom of the wrapped input so the cursor stays visible
+    // when the rendered height is smaller than the wrapped line count.
+    let visible = chunks[1].height as usize;
+    let scroll = lines.len().saturating_sub(visible) as u16;
+
+    let paragraph = Paragraph::new(lines).scroll((scroll, 0));
+    frame.render_widget(paragraph, chunks[1]);
+}
+
+/// Hand-wrap the (prefix + body + cursor) sequence by display columns so
+/// long input grows down instead of overflowing the popup horizontally.
+/// We do not use `Paragraph::wrap` here because it word-wraps and would
+/// leave gaps that make character-by-character cursor tracking fragile.
+fn wrap_input_lines<'a>(
+    input: &'a str,
+    width: u16,
+    prefix: Span<'a>,
+    body_style: Style,
+    cursor: Span<'a>,
+) -> Vec<Line<'a>> {
+    let width = width.max(1) as usize;
+    let prefix_cols = UnicodeWidthStr::width(prefix.content.as_ref());
+
+    let mut lines: Vec<Line<'a>> = Vec::new();
+    let mut current: Vec<Span<'a>> = vec![prefix];
+    let mut buf = String::new();
+    let mut col = prefix_cols;
+
+    for ch in input.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w > 0 && col + w > width {
+            if !buf.is_empty() {
+                current.push(Span::styled(std::mem::take(&mut buf), body_style));
+            }
+            lines.push(Line::from(std::mem::take(&mut current)));
+            col = 0;
+        }
+        buf.push(ch);
+        col += w;
+    }
+    if !buf.is_empty() {
+        current.push(Span::styled(buf, body_style));
+    }
+
+    let cursor_w = UnicodeWidthStr::width(cursor.content.as_ref()).max(1);
+    if col + cursor_w > width {
+        lines.push(Line::from(std::mem::take(&mut current)));
+    }
+    current.push(cursor);
+    lines.push(Line::from(current));
+    lines
 }
 
 fn popup_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
