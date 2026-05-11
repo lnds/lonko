@@ -10,7 +10,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::state::{AppState, ChatDirection, ChatLog};
+use crate::state::{AppState, ChatDirection, ChatLog, ChatView};
 
 /// Maximum fraction of the chat overlay's inner height the input line is
 /// allowed to grow into when the user types more than fits on one row.
@@ -27,7 +27,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     let area = popup_rect(frame.area(), 70, 70);
     frame.render_widget(Clear, area);
 
-    let title = format!(" chat with agent {} ", view.agent_id);
+    // Title budget: total width minus the two corner cells of the border.
+    let title_budget = area.width.saturating_sub(2);
+    let title = chat_title(state, view, title_budget);
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -45,6 +47,44 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     render_log(frame, chunks[0], state.chat_logs.get(&view.agent_id), view.scroll);
     render_input(frame, chunks[1], &view.input, online);
+}
+
+/// Build the title shown on the chat overlay's border. Prefers the
+/// agent's display name (same as the agents-list card) plus optional
+/// `@host` and branch suffix, dropping pieces if the title would overflow
+/// the available width. Falls back to "agent <pid>" if no session matches
+/// (e.g. the agent disconnected while the chat view was open).
+fn chat_title(state: &AppState, view: &ChatView, available: u16) -> String {
+    let session = state
+        .sessions
+        .iter()
+        .find(|s| s.pid.to_string() == view.agent_id);
+    let Some(session) = session else {
+        return format!(" chat · agent {} ", view.agent_id);
+    };
+
+    let name = session.display_name();
+    let host_suffix = session
+        .host
+        .as_deref()
+        .map(|h| format!(" @{h}"))
+        .unwrap_or_default();
+    let branch_suffix = session
+        .branch
+        .as_deref()
+        .map(|b| format!(" · ⑂ {b}"))
+        .unwrap_or_default();
+
+    let full = format!(" chat · {name}{host_suffix}{branch_suffix} ");
+    let avail = available as usize;
+    if UnicodeWidthStr::width(full.as_str()) <= avail {
+        return full;
+    }
+    let no_branch = format!(" chat · {name}{host_suffix} ");
+    if UnicodeWidthStr::width(no_branch.as_str()) <= avail {
+        return no_branch;
+    }
+    format!(" chat · {name} ")
 }
 
 /// Number of rows the input text needs after soft-wrapping by display
