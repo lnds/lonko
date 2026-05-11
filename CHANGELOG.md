@@ -1,3 +1,9 @@
+## v0.26.0 (2026-05-11)
+
+### Feat
+
+- **chat**: show agent name and branch in chat overlay title
+
 ## v0.25.1 (2026-05-09)
 
 ### Fix
