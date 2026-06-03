@@ -470,6 +470,34 @@ pub fn create_session(name: &str, cwd: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Returns true if a tmux session with the exact given name exists.
+/// Uses the `=name` exact-match form so `lonko` does not match `lonko-foo`.
+pub fn has_session(name: &str) -> bool {
+    Command::new("tmux")
+        .args(["has-session", "-t", &format!("={name}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Return the command currently running in `target`'s active pane
+/// (`#{pane_current_command}`), e.g. `zsh`, `claude`, `node`. `None` when
+/// the target doesn't exist or tmux errors.
+pub fn pane_current_command(target: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-t", target, "-p", "#{pane_current_command}"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let cmd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if cmd.is_empty() { None } else { Some(cmd) }
+}
+
 /// Send Ctrl-C to a tmux pane (non-literal, so tmux interprets C-c as the real key).
 /// Silences stderr — see `focus_pane` for the rationale.
 pub fn send_ctrl_c(pane_id: &str) -> anyhow::Result<()> {

@@ -59,6 +59,14 @@ pub enum Event {
         cwd: String,
         result: Result<Vec<crate::state::PrPickItem>, String>,
     },
+    /// Result of the background `wt list --format json` call kicked off when
+    /// the user opens the worktree picker. The picker stays in "loading…"
+    /// until this event lands; on error we stash the message in
+    /// `AppState::worktree_picker.error`.
+    WorktreePickerLoaded {
+        cwd: String,
+        result: Result<Vec<crate::state::WtPickItem>, String>,
+    },
     /// Periodic refresh of PR info for one repo. Fired ~every 30 s per
     /// unique local `repo_root`; populates the cache used to badge agent
     /// cards with `#NNNN` (plus a blinking `M` once merged). Errors are

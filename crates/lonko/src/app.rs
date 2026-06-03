@@ -895,6 +895,26 @@ impl App {
                     }
                 }
             }
+            Event::WorktreePickerLoaded { cwd, result } => {
+                // Drop the payload if the user already closed the picker or
+                // moved on to a different repo.
+                if !self.state.worktree_picker.mode
+                    || self.state.worktree_picker.cwd.as_deref() != Some(cwd.as_str())
+                {
+                    return Ok(false);
+                }
+                self.state.worktree_picker.loading = false;
+                match result {
+                    Ok(items) => {
+                        self.state.worktree_picker.items = items;
+                        self.state.worktree_picker.selected = 0;
+                        self.state.worktree_picker.error = None;
+                    }
+                    Err(e) => {
+                        self.state.worktree_picker.error = Some(e);
+                    }
+                }
+            }
             Event::PrsByRepoRefreshed { repo_root, items } => {
                 let map: std::collections::HashMap<String, crate::state::PrInfo> =
                     items.into_iter().collect();
@@ -1357,6 +1377,14 @@ impl App {
             }
             return Some(false);
         }
+        if self.state.worktree_picker.mode {
+            if let Some(submit) = self.state.apply_worktree_picker_key(code, ctrl)
+                && !submit.path.is_empty()
+            {
+                self.spawn_resume_worktree(&submit.path);
+            }
+            return Some(false);
+        }
         if self.state.worktree.mode {
             if let Some(branch) = self.state.apply_worktree_key(code, ctrl) {
                 let cwd = self.state.worktree.cwd.take().unwrap_or_default();
@@ -1503,6 +1531,9 @@ impl App {
             }
             KeyCode::Char('p') if self.state.active_tab == Tab::Agents => {
                 self.open_pr_picker();
+            }
+            KeyCode::Char('u') if self.state.active_tab == Tab::Agents => {
+                self.open_worktree_picker();
             }
             KeyCode::Char('o') if self.state.active_tab == Tab::Agents => {
                 self.open_selected_pr();
@@ -1802,6 +1833,54 @@ impl App {
         std::thread::spawn(move || {
             if let Err(e) = crate::worktree::run(&cwd, &branch) {
                 tmux::display_message(&format!("worktree: {e}"));
+            }
+        });
+    }
+
+    /// Open the worktree picker: mark it loading and kick off a background
+    /// `wt list --format json` for the selected agent's repo. The result
+    /// comes back through `Event::WorktreePickerLoaded`. The picker lists the
+    /// linked worktrees of that repo so the user can resume Claude in one of
+    /// them (`claude --continue`), regardless of whether it still has an
+    /// agent card.
+    fn open_worktree_picker(&mut self) {
+        let cwd = self
+            .state
+            .selected_session()
+            .filter(|s| s.host.is_none())
+            .map(|s| s.cwd.clone())
+            .or_else(|| self.state.sessions.iter().find(|s| s.host.is_none()).map(|s| s.cwd.clone()));
+        let Some(cwd) = cwd else {
+            tmux::display_message("worktree: no local agent to anchor the repo");
+            return;
+        };
+        if crate::worktree::git_root(&cwd).is_none() {
+            tmux::display_message("worktree: not a git repository");
+            return;
+        }
+        self.state.worktree_picker.mode = true;
+        self.state.worktree_picker.loading = true;
+        self.state.worktree_picker.error = None;
+        self.state.worktree_picker.items.clear();
+        self.state.worktree_picker.selected = 0;
+        self.state.worktree_picker.query.clear();
+        self.state.worktree_picker.cwd = Some(cwd.clone());
+
+        let Some(ref tx) = self.scan_tx else { return };
+        let tx = tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = crate::worktree::list_worktrees(&cwd);
+            let _ = tx.send(Event::WorktreePickerLoaded { cwd, result });
+        });
+    }
+
+    /// Resume Claude in `path` (a worktree directory) in a background thread.
+    /// Used by the worktree picker when the user confirms a row with Enter.
+    fn spawn_resume_worktree(&self, path: &str) {
+        let path = path.to_string();
+        std::thread::spawn(move || {
+            if let Err(e) = crate::worktree::resume(&path) {
+                tmux::display_message(&format!("resume: {e}"));
             }
         });
     }

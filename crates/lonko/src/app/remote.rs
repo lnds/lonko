@@ -321,6 +321,7 @@ impl App {
                 sessions,
                 fail_count,
                 next_poll_tick,
+                health: crate::state::HealthCache::default(),
             });
             // Keep hosts sorted alphabetically.
             self.state.remote_hosts.sort_by(|a, b| {

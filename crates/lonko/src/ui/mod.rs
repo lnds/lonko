@@ -7,6 +7,7 @@ pub(crate) mod list;
 mod new_agent;
 mod pr_picker;
 mod remote;
+mod worktree_picker;
 pub(crate) mod tmux_sessions;
 
 use ratatui::Frame;
@@ -54,6 +55,10 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     if state.pr_picker.mode {
         pr_picker::render(frame, state);
+    }
+
+    if state.worktree_picker.mode {
+        worktree_picker::render(frame, state);
     }
 
     if state.chat_view.is_some() {

@@ -434,6 +434,26 @@ pub struct PrPickerState {
     pub selected: usize,
 }
 
+#[derive(Debug, Default)]
+pub struct WtPickerState {
+    /// Worktree picker modal is open (triggered by `u` in the Agents tab).
+    pub mode: bool,
+    /// Filter query applied to the worktree list (substring,
+    /// case-insensitive, matched against branch and path).
+    pub query: String,
+    /// Whether the background `wt list` call is still in flight.
+    pub loading: bool,
+    /// Error message from the last `wt list` call, if any.
+    pub error: Option<String>,
+    /// The repo cwd used for the current picker fetch (so the resume
+    /// routes to the same repo).
+    pub cwd: Option<String>,
+    /// Worktrees returned by `wt`, in the order they came back.
+    pub items: Vec<WtPickItem>,
+    /// Selected index in the **filtered** picker list.
+    pub selected: usize,
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub sessions: Vec<Session>,
@@ -490,6 +510,10 @@ pub struct AppState {
     /// PRs for the repo of the selected agent so the user can pick one
     /// to review in a fresh worktree.
     pub pr_picker: PrPickerState,
+    /// Worktree picker modal (triggered by `u` in the Agents tab): lists the
+    /// linked worktrees of the selected agent's repo so the user can resume
+    /// Claude in one of them via `claude --continue`.
+    pub worktree_picker: WtPickerState,
     /// PR info per repo, keyed by `repo_root` → branch → PrInfo.
     /// Refreshed in the background every ~30s via `gh pr list` per unique
     /// local `repo_root`, including both open and recently-merged PRs.
@@ -594,6 +618,30 @@ pub struct PrPickerSubmit {
     pub title: String,
 }
 
+/// One worktree row in the resume picker. Populated from `wt list --format
+/// json`. The main/trunk worktree is filtered out before this list is built
+/// — the picker only offers the linked worktrees you can resume into.
+#[derive(Debug, Clone)]
+pub struct WtPickItem {
+    /// Branch checked out in the worktree (empty when detached).
+    pub branch: String,
+    /// Absolute path to the worktree directory.
+    pub path: String,
+    /// Whether the working tree has uncommitted changes.
+    pub dirty: bool,
+    /// Whether a tmux session for this worktree is currently alive.
+    pub live: bool,
+}
+
+/// Everything the caller needs to resume a worktree after the user confirms
+/// a row in the picker. Returning this struct (rather than borrowing the
+/// item) keeps the spawn site decoupled from `AppState` once the picker has
+/// been cleared.
+#[derive(Debug, Clone)]
+pub struct WtPickerSubmit {
+    pub path: String,
+}
+
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum NewAgentField {
     #[default]
@@ -673,6 +721,35 @@ pub enum HostStatus {
     Unreachable,
 }
 
+/// Granular health of a registered remote peer. Variants are ordered
+/// from most to least degraded so comparison operators work correctly
+/// (Unreachable < ChatDead < … < Healthy).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HostHealth {
+    Unreachable,
+    PluginMissing,
+    ChatDead,
+    VersionSkew { remote: String, local: String },
+    Healthy,
+}
+
+/// Cached health probe results for a registered peer.
+#[derive(Debug, Clone, Default)]
+pub struct HealthCache {
+    /// Output of `lonko --version` on the remote, or None if not yet checked.
+    pub remote_version: Option<String>,
+    /// Whether `~/.claude/lonko-channel/dist/index.js` exists on the remote.
+    pub plugin_built: Option<bool>,
+    /// Derived health level. None means "not yet checked".
+    pub health: Option<HostHealth>,
+    /// Monotonic instant when the last probe ran.
+    pub checked_at: Option<Instant>,
+    /// Consecutive version-check failures (for backoff).
+    pub probe_fail_count: u32,
+    /// Tick at which the next background probe is due.
+    pub next_probe_tick: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct RemoteHost {
     pub hostname: String,
@@ -682,6 +759,23 @@ pub struct RemoteHost {
     pub fail_count: u32,
     /// Tick number at which this host becomes eligible for polling again.
     pub next_poll_tick: u64,
+    /// Version / plugin / chat health beyond mere SSH reachability.
+    pub health: HealthCache,
+}
+
+/// Resolve the effective health of a host, blending SSH reachability
+/// (already polled by the existing remote bridge) with the cached
+/// version/plugin probe result.
+///
+/// Returns `None` when no probe has run yet AND the host is reachable —
+/// caller should render an "unknown" placeholder. Reachability beats
+/// every probed value: an Unreachable host is always Unreachable, even
+/// if a stale probe says Healthy.
+pub fn effective_health(host: &RemoteHost) -> Option<HostHealth> {
+    if host.status == HostStatus::Unreachable {
+        return Some(HostHealth::Unreachable);
+    }
+    host.health.health.clone()
 }
 
 #[derive(Debug, Default, PartialEq, Clone)]
@@ -725,6 +819,7 @@ impl Default for AppState {
             remote_enabled: false,
             remote_poll_ticks: 300, // 30s default; matches RemoteConfig::default
             pr_picker: PrPickerState::default(),
+            worktree_picker: WtPickerState::default(),
             pr_infos_by_repo: HashMap::new(),
             chat_logs: HashMap::new(),
             chat_online: HashSet::new(),
@@ -1436,6 +1531,97 @@ impl AppState {
     /// when the list is empty.
     pub fn selected_pr_picker_item(&self) -> Option<&PrPickItem> {
         self.filtered_pr_picker().into_iter().nth(self.pr_picker.selected)
+    }
+
+    /// Apply a key to the worktree picker. Returns `Some(WtPickerSubmit)`
+    /// when the user pressed Enter on a valid row — the caller is expected
+    /// to resume Claude in that worktree. The picker state is cleared before
+    /// returning. Navigation, filter edits and cancels resolve in-place.
+    pub fn apply_worktree_picker_key(
+        &mut self,
+        code: crossterm::event::KeyCode,
+        ctrl: bool,
+    ) -> Option<WtPickerSubmit> {
+        use crossterm::event::KeyCode;
+        match code {
+            KeyCode::Esc => {
+                self.clear_worktree_picker();
+            }
+            KeyCode::Char('c') if ctrl => {
+                self.clear_worktree_picker();
+            }
+            KeyCode::Enter => {
+                if let Some(item) = self.selected_worktree_picker_item() {
+                    let submit = WtPickerSubmit { path: item.path.clone() };
+                    self.clear_worktree_picker();
+                    return Some(submit);
+                }
+            }
+            KeyCode::Up => { self.navigate_worktree_picker(-1); }
+            KeyCode::Down => { self.navigate_worktree_picker(1); }
+            KeyCode::Char('p') if ctrl => { self.navigate_worktree_picker(-1); }
+            KeyCode::Char('n') if ctrl => { self.navigate_worktree_picker(1); }
+            KeyCode::Backspace => {
+                self.worktree_picker.query.pop();
+                self.worktree_picker.selected = 0;
+            }
+            KeyCode::Char(c) => {
+                self.worktree_picker.query.push(c);
+                self.worktree_picker.selected = 0;
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Reset worktree picker state back to closed.
+    pub fn clear_worktree_picker(&mut self) {
+        self.worktree_picker.mode = false;
+        self.worktree_picker.query.clear();
+        self.worktree_picker.loading = false;
+        self.worktree_picker.error = None;
+        self.worktree_picker.cwd = None;
+        self.worktree_picker.items.clear();
+        self.worktree_picker.selected = 0;
+    }
+
+    /// Substring-match the query against each worktree's branch and path.
+    /// Empty query returns all worktrees in insertion order.
+    pub fn filtered_worktree_picker(&self) -> Vec<&WtPickItem> {
+        if self.worktree_picker.query.is_empty() {
+            return self.worktree_picker.items.iter().collect();
+        }
+        let q = self.worktree_picker.query.to_lowercase();
+        self.worktree_picker.items
+            .iter()
+            .filter(|w| {
+                w.branch.to_lowercase().contains(&q)
+                    || w.path.to_lowercase().contains(&q)
+            })
+            .collect()
+    }
+
+    /// Clamp and move the worktree picker selection cursor by `delta`. The
+    /// cursor indexes into the **filtered** list so it stays consistent as
+    /// the user narrows the query.
+    pub fn navigate_worktree_picker(&mut self, delta: isize) {
+        let len = self.filtered_worktree_picker().len();
+        if len == 0 {
+            self.worktree_picker.selected = 0;
+            return;
+        }
+        let max = len - 1;
+        if delta > 0 {
+            self.worktree_picker.selected = (self.worktree_picker.selected + 1).min(max);
+        } else {
+            self.worktree_picker.selected = self.worktree_picker.selected.saturating_sub(1);
+        }
+    }
+
+    /// Returns the currently selected worktree in the filtered list, or
+    /// `None` when the list is empty.
+    pub fn selected_worktree_picker_item(&self) -> Option<&WtPickItem> {
+        self.filtered_worktree_picker().into_iter().nth(self.worktree_picker.selected)
     }
 
     /// Open the new-agent popup. If `cwd` is non-empty, the Dir field
@@ -2455,6 +2641,83 @@ mod tests {
         assert!(state.apply_pr_picker_key(KeyCode::Esc, false).is_none());
         assert!(!state.pr_picker.mode);
         assert!(state.pr_picker.prs.is_empty());
+    }
+
+    fn mk_wt(branch: &str, path: &str) -> WtPickItem {
+        WtPickItem {
+            branch: branch.into(),
+            path: path.into(),
+            dirty: false,
+            live: false,
+        }
+    }
+
+    #[test]
+    fn worktree_picker_filter_matches_branch_or_path() {
+        let mut state = AppState::default();
+        state.worktree_picker.items = vec![
+            mk_wt("feat-login", "/repo/feat-login"),
+            mk_wt("fix-chat", "/repo/fix-chat"),
+        ];
+        state.worktree_picker.query = "LOGIN".into();
+        let got: Vec<&str> = state
+            .filtered_worktree_picker()
+            .iter()
+            .map(|w| w.branch.as_str())
+            .collect();
+        assert_eq!(got, vec!["feat-login"]);
+
+        state.worktree_picker.query = "fix-chat".into();
+        let got: Vec<&str> = state
+            .filtered_worktree_picker()
+            .iter()
+            .map(|w| w.path.as_str())
+            .collect();
+        assert_eq!(got, vec!["/repo/fix-chat"]);
+    }
+
+    #[test]
+    fn worktree_picker_navigate_clamps_to_filtered_bounds() {
+        let mut state = AppState::default();
+        state.worktree_picker.items = vec![
+            mk_wt("a", "/r/a"),
+            mk_wt("b", "/r/b"),
+            mk_wt("c", "/r/c"),
+        ];
+        state.worktree_picker.selected = 0;
+        state.navigate_worktree_picker(1);
+        state.navigate_worktree_picker(1);
+        state.navigate_worktree_picker(1);
+        assert_eq!(state.worktree_picker.selected, 2); // clamped at top
+        state.navigate_worktree_picker(-1);
+        state.navigate_worktree_picker(-1);
+        state.navigate_worktree_picker(-1);
+        assert_eq!(state.worktree_picker.selected, 0); // clamped at bottom
+    }
+
+    #[test]
+    fn worktree_picker_enter_returns_submit_and_clears_state() {
+        use crossterm::event::KeyCode;
+        let mut state = AppState::default();
+        state.worktree_picker.mode = true;
+        state.worktree_picker.items = vec![mk_wt("feat-x", "/repo/feat-x")];
+        state.worktree_picker.selected = 0;
+
+        let submit = state.apply_worktree_picker_key(KeyCode::Enter, false);
+        assert_eq!(submit.map(|s| s.path), Some("/repo/feat-x".to_string()));
+        assert!(!state.worktree_picker.mode);
+        assert!(state.worktree_picker.items.is_empty());
+    }
+
+    #[test]
+    fn worktree_picker_esc_closes_without_submission() {
+        use crossterm::event::KeyCode;
+        let mut state = AppState::default();
+        state.worktree_picker.mode = true;
+        state.worktree_picker.items = vec![mk_wt("a", "/r/a")];
+        assert!(state.apply_worktree_picker_key(KeyCode::Esc, false).is_none());
+        assert!(!state.worktree_picker.mode);
+        assert!(state.worktree_picker.items.is_empty());
     }
 
     #[test]
@@ -3652,5 +3915,68 @@ mod tests {
         let log = state.chat_logs.get("42").unwrap();
         assert_eq!(log.messages.len(), 2);
         assert!(log.messages.iter().all(|m| m.direction == ChatDirection::Out));
+    }
+
+    fn mk_remote_host(status: HostStatus, cached: Option<HostHealth>) -> RemoteHost {
+        RemoteHost {
+            hostname: "kayshon".into(),
+            status,
+            sessions: vec![],
+            fail_count: 0,
+            next_poll_tick: 0,
+            health: HealthCache {
+                health: cached,
+                ..HealthCache::default()
+            },
+        }
+    }
+
+    #[test]
+    fn effective_health_unprobed_online_is_none() {
+        let host = mk_remote_host(HostStatus::Online, None);
+        assert_eq!(effective_health(&host), None);
+    }
+
+    #[test]
+    fn effective_health_unreachable_overrides_cache() {
+        // Even a cached Healthy result is wrong when the host is unreachable.
+        let host = mk_remote_host(HostStatus::Unreachable, Some(HostHealth::Healthy));
+        assert_eq!(effective_health(&host), Some(HostHealth::Unreachable));
+    }
+
+    #[test]
+    fn effective_health_unreachable_without_cache() {
+        let host = mk_remote_host(HostStatus::Unreachable, None);
+        assert_eq!(effective_health(&host), Some(HostHealth::Unreachable));
+    }
+
+    #[test]
+    fn effective_health_online_returns_cached_value() {
+        let host = mk_remote_host(HostStatus::Online, Some(HostHealth::Healthy));
+        assert_eq!(effective_health(&host), Some(HostHealth::Healthy));
+
+        let host = mk_remote_host(HostStatus::Online, Some(HostHealth::PluginMissing));
+        assert_eq!(effective_health(&host), Some(HostHealth::PluginMissing));
+    }
+
+    #[test]
+    fn host_health_ordering_matches_severity() {
+        // The Ord derive must keep Unreachable < ... < Healthy so callers
+        // can use min/max for "worst of two hosts" rendering decisions.
+        assert!(HostHealth::Unreachable < HostHealth::PluginMissing);
+        assert!(HostHealth::PluginMissing < HostHealth::ChatDead);
+        assert!(
+            HostHealth::ChatDead
+                < HostHealth::VersionSkew {
+                    remote: "0.25.0".into(),
+                    local: "0.26.0".into(),
+                }
+        );
+        assert!(
+            HostHealth::VersionSkew {
+                remote: "0.25.0".into(),
+                local: "0.26.0".into(),
+            } < HostHealth::Healthy
+        );
     }
 }

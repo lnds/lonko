@@ -197,6 +197,138 @@ pub fn run(cwd: &str, branch: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Shells we treat as "idle" — when one of these is the foreground process
+/// in a worktree's tmux session, Claude has already exited and it is safe to
+/// relaunch `claude --continue` into the prompt. Anything else (most often
+/// `claude` or its `node` host) means a session is still live, so we just
+/// switch to it instead of typing into its input.
+const IDLE_SHELLS: &[&str] = &["zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh"];
+
+/// Resume an existing worktree by reopening Claude inside it, continuing the
+/// most recent conversation (`claude --continue`).
+///
+/// Used by the worktree resume picker. Derives the tmux session name from the
+/// worktree directory's basename — for worktrees created by [`run`] this
+/// already equals `{repo}-{branch}`. Behavior depends on what (if anything)
+/// is already running there:
+///
+/// - **No tmux session** (Claude exited and the session died, or it was never
+///   started): create a fresh detached session and launch `claude --continue`.
+/// - **Session at an idle shell** (Claude exited but the shell stayed up):
+///   relaunch `claude --continue` in place.
+/// - **Session running something else** (Claude still live): leave it alone
+///   and just switch to it, so we never type into a running Claude's input.
+///
+/// Either way the client is switched to the worktree's session at the end.
+pub fn resume(cwd: &str) -> anyhow::Result<()> {
+    let root = git_root(cwd)
+        .ok_or_else(|| anyhow::anyhow!("not a git repository: {cwd}"))?;
+
+    let session_name = Path::new(&root)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(sanitize_branch)
+        .ok_or_else(|| anyhow::anyhow!("cannot derive session name from {root}"))?;
+
+    if !tmux::has_session(&session_name) {
+        // No session: create it and resume the most recent conversation.
+        tmux::create_session(&session_name, &root)?;
+        tmux::send_command(&session_name, "clear && claude --continue")?;
+    } else {
+        // Session exists: only relaunch when it is sitting at an idle shell.
+        let at_idle_shell = tmux::pane_current_command(&session_name)
+            .map(|cmd| IDLE_SHELLS.contains(&cmd.as_str()))
+            .unwrap_or(false);
+        if at_idle_shell {
+            tmux::send_command(&session_name, "clear && claude --continue")?;
+        }
+    }
+
+    // Switch the client to the worktree's session.
+    let _ = Command::new("tmux")
+        .args(["switch-client", "-t", &session_name])
+        .stderr(std::process::Stdio::null())
+        .status();
+    Ok(())
+}
+
+/// List the linked worktrees of the repo containing `cwd`, via
+/// `wt list --format json`. Excludes the main/trunk worktree — the picker
+/// only offers the worktrees you can resume into. Each item is tagged with
+/// whether a tmux session for it is currently alive.
+///
+/// Returns the error message (stderr first line, or a parse/IO error) so the
+/// picker can surface it.
+pub fn list_worktrees(cwd: &str) -> std::result::Result<Vec<crate::state::WtPickItem>, String> {
+    let output = Command::new("wt")
+        .args(["-C", cwd, "list", "--format", "json"])
+        .output()
+        .map_err(|e| format!("failed to run wt: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let first = stderr.lines().next().unwrap_or("wt list failed");
+        return Err(first.to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let rows = parse_wt_list(&stdout)?;
+
+    // Tag each worktree with whether a tmux session for it is alive. Kept out
+    // of `parse_wt_list` so the parser stays pure and unit-testable.
+    Ok(rows
+        .into_iter()
+        .map(|(branch, path, dirty)| {
+            let live = Path::new(&path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| tmux::has_session(&sanitize_branch(n)))
+                .unwrap_or(false);
+            crate::state::WtPickItem { branch, path, dirty, live }
+        })
+        .collect())
+}
+
+/// Parse the JSON emitted by `wt list --format json` into
+/// `(branch, path, dirty)` tuples, dropping the main/trunk worktree and any
+/// row without a path. Pure (no process spawning) so it can be unit-tested
+/// against captured `wt` output.
+fn parse_wt_list(stdout: &str) -> std::result::Result<Vec<(String, String, bool)>, String> {
+    // `wt` appends an ANSI reset (`\e[0m`) after the closing bracket, which
+    // is trailing garbage for a strict JSON parser. Slice from the first `[`
+    // to the last `]` so we hand serde only the array.
+    let json = match (stdout.find('['), stdout.rfind(']')) {
+        (Some(start), Some(end)) if end >= start => &stdout[start..=end],
+        _ => return Err("wt list returned no JSON array".to_string()),
+    };
+
+    #[derive(serde::Deserialize, Default)]
+    struct WorkingTree {
+        #[serde(default)] staged: bool,
+        #[serde(default)] modified: bool,
+        #[serde(default)] untracked: bool,
+    }
+    #[derive(serde::Deserialize)]
+    struct Row {
+        #[serde(default)] branch: String,
+        #[serde(default)] path: String,
+        #[serde(default)] is_main: bool,
+        #[serde(default)] working_tree: WorkingTree,
+    }
+    let rows: Vec<Row> = serde_json::from_str(json)
+        .map_err(|e| format!("wt returned malformed JSON: {e}"))?;
+
+    Ok(rows
+        .into_iter()
+        .filter(|r| !r.is_main && !r.path.is_empty())
+        .map(|r| {
+            let dirty = r.working_tree.staged
+                || r.working_tree.modified
+                || r.working_tree.untracked;
+            (r.branch, r.path, dirty)
+        })
+        .collect())
+}
+
 /// List recently-merged PRs for the GitHub repo containing `cwd`.
 ///
 /// Returns `(branch, number)` pairs. Used by the periodic poll so a card
@@ -841,6 +973,34 @@ mod tests {
     #[test]
     fn prune_non_git_dir_returns_err() {
         assert!(prune("/tmp").is_err());
+    }
+
+    #[test]
+    fn parse_wt_list_drops_main_and_handles_trailing_ansi() {
+        // Captured shape of `wt list --format json`: a main worktree plus a
+        // linked one, followed by a stray ANSI reset after the array.
+        let stdout = "[\n\
+          {\"branch\":\"main\",\"path\":\"/repo\",\"is_main\":true,\
+            \"working_tree\":{\"modified\":true}},\n\
+          {\"branch\":\"feat-x\",\"path\":\"/repo-feat-x\",\"is_main\":false,\
+            \"working_tree\":{\"staged\":false,\"modified\":false,\"untracked\":true}}\n\
+          ]\n\u{1b}[0m";
+        let rows = parse_wt_list(stdout).expect("parses");
+        // main is filtered out; only the linked worktree remains.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "feat-x");
+        assert_eq!(rows[0].1, "/repo-feat-x");
+        assert!(rows[0].2, "untracked file should mark the worktree dirty");
+    }
+
+    #[test]
+    fn parse_wt_list_empty_array_is_ok() {
+        assert_eq!(parse_wt_list("[]\n").unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn parse_wt_list_no_array_returns_err() {
+        assert!(parse_wt_list("not json").is_err());
     }
 
     #[test]
