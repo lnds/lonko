@@ -1,3 +1,9 @@
+## v0.27.0 (2026-06-03)
+
+### Feat
+
+- **worktree**: add resume picker to reopen Claude in a worktree
+
 ## v0.26.0 (2026-05-11)
 
 ### Feat
