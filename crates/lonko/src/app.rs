@@ -11,7 +11,7 @@ use crate::{
     control::{ghostty, tmux, tmux::tmux_session_for_pane},
     event::Event,
     focus,
-    sources::{chat, hooks, lifecycle, transcript, tmux_scanner},
+    sources::{chat, chat_peer::PeerFrame, hooks, lifecycle, transcript, tmux_scanner},
     state::{AppState, KeyOutcome, Session, SessionStatus, Tab},
     ui,
 };
@@ -149,6 +149,17 @@ pub struct App {
     /// PPID (= the Claude Code session's PID). Used to push `chat.send`
     /// frames into a specific agent's running channel plugin.
     chat_registry: chat::Registry,
+    /// Locally-connected plugins keyed by ppid → resolved `session_id`
+    /// (`None` until the matching `Session` exists). Drives the
+    /// ppid→session_id translation and the retry-on-tick for the race
+    /// where a plugin announces before its hook-created session lands.
+    chat_plugins: std::collections::HashMap<u32, Option<String>>,
+    /// Peers (remote workstations) connected to THIS host's chat-peer
+    /// socket. The router broadcasts local chat activity to them.
+    chat_peers: chat::PeerHub,
+    /// Outbound SSH chat-links keyed by host. One `ssh <host> lonko
+    /// chat-link` child per online Tailnet host, relaying cross-host chat.
+    chat_links: std::collections::HashMap<String, crate::sources::chat_link::ChatLink>,
 }
 
 impl App {
@@ -178,6 +189,9 @@ impl App {
             remote_online_hosts: std::collections::HashSet::new(),
             panel_moving_until: None,
             chat_registry: chat::Registry::new(),
+            chat_plugins: std::collections::HashMap::new(),
+            chat_peers: chat::PeerHub::new(),
+            chat_links: std::collections::HashMap::new(),
         }
     }
 
@@ -260,6 +274,11 @@ impl App {
 
         // Spawn the chat socket listener (lonko-channel plugin connections)
         chat::spawn_listener(tx.clone(), self.chat_registry.clone())
+            .map_err(|e| color_eyre::eyre::eyre!(e))?;
+
+        // Spawn the chat-peer socket listener (cross-host chat-link
+        // connections from peer workstations).
+        chat::spawn_peer_listener(tx.clone(), self.chat_peers.clone())
             .map_err(|e| color_eyre::eyre::eyre!(e))?;
 
         loop {
@@ -860,6 +879,7 @@ impl App {
                 // in the Agents list.
                 if self.state.remote_enabled {
                     self.sync_remote_bridges();
+                    self.sync_chat_links();
                 }
             }
             Event::RemoteBridgeStarted { host, result } => {
@@ -920,17 +940,75 @@ impl App {
                     items.into_iter().collect();
                 self.state.pr_infos_by_repo.insert(repo_root, map);
             }
-            Event::ChatOnline { ppid, pid } => {
-                self.state.on_chat_online(ppid, pid);
+            // ── Local plugin events (raw ppid) ───────────────────────
+            Event::PluginOnline { ppid } => {
+                self.chat_plugins.entry(ppid).or_insert(None);
+                self.resolve_chat_plugin(ppid);
             }
-            Event::ChatOffline { ppid } => {
-                self.state.on_chat_offline(ppid);
+            Event::PluginOffline { ppid } => {
+                if let Some(Some(session_id)) = self.chat_plugins.remove(&ppid) {
+                    let key = (None, session_id.clone());
+                    self.state.on_chat_offline(&key);
+                    self.chat_peers.broadcast(&PeerFrame::Offline { session_id });
+                }
             }
-            Event::ChatReply { agent_id, text, in_reply_to } => {
-                self.state.on_chat_reply(&agent_id, text, in_reply_to);
+            Event::PluginReply { agent_id, text, in_reply_to } => {
+                // agent_id is the ppid stringified.
+                if let Some(session_id) = agent_id
+                    .parse::<u32>()
+                    .ok()
+                    .and_then(|ppid| self.ppid_to_session_id(ppid))
+                {
+                    self.state.on_chat_reply(
+                        (None, session_id.clone()),
+                        text.clone(),
+                        in_reply_to.clone(),
+                    );
+                    self.chat_peers.broadcast(&PeerFrame::Reply {
+                        session_id,
+                        in_reply_to,
+                        text,
+                    });
+                }
             }
-            Event::ChatAck { msg_id, status } => {
-                self.state.on_chat_ack(&msg_id, &status);
+            Event::PluginAck { msg_id, status } => {
+                // v1: no-op on local ack; relay to peers for symmetry once
+                // a delivered indicator exists. msg_id has no session here.
+                let _ = (msg_id, status);
+            }
+            // ── Host-aware chat events (from chat-link, host = Some) ──
+            Event::ChatOnline { host, session_id } => {
+                self.state.on_chat_online((host, session_id));
+            }
+            Event::ChatOffline { host, session_id } => {
+                self.state.on_chat_offline(&(host, session_id));
+            }
+            Event::ChatReply { host, session_id, text, in_reply_to } => {
+                self.state.on_chat_reply((host, session_id), text, in_reply_to);
+            }
+            Event::ChatAck { host, session_id, msg_id, status } => {
+                self.state.on_chat_ack(&(host, session_id), &msg_id, &status);
+            }
+            // ── Peer transport ───────────────────────────────────────
+            Event::PeerSend { session_id, msg_id, text } => {
+                // A peer asked us to deliver to one of our local agents.
+                if let Some(ppid) = self.session_id_to_ppid(&session_id)
+                    && let Some(writer) = self.chat_registry.get(ppid)
+                {
+                    let _ = writer.send(chat::ChatFrame::Send { msg_id, text });
+                }
+            }
+            Event::PeerConnected => {
+                // Replay the current local online set so the new peer's TUI
+                // lights up chat-capable agents announced before the link.
+                let online: Vec<String> = self
+                    .chat_plugins
+                    .values()
+                    .filter_map(|v| v.clone())
+                    .collect();
+                for session_id in online {
+                    self.chat_peers.broadcast(&PeerFrame::Online { session_id });
+                }
             }
         }
         Ok(false)
@@ -955,6 +1033,9 @@ impl App {
         }
         // Prune sessions that completed more than 30 seconds ago
         self.state.prune_completed(30);
+        // Resolve any chat plugins that announced before their session
+        // existed (ppid→session_id race), marking them online once matched.
+        self.resolve_pending_chat_plugins();
         // Write session cache every second for `lonko focus N`.
         if self.state.tick % 10 == 1 {
             self.write_sessions_cache();
@@ -1133,6 +1214,7 @@ impl App {
             });
 
             self.sync_remote_bridges();
+            self.sync_chat_links();
         }
 
         // Per-host tmux polling runs whenever remote support is enabled

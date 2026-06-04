@@ -44,6 +44,12 @@ async fn main() -> Result<()> {
         }
         return install_remote::run(host).map_err(|e| color_eyre::eyre::eyre!(e));
     }
+    if args.get(1).map(|s| s.as_str()) == Some("chat-link") {
+        // Cross-host chat relay: runs on a remote host, spawned by a peer
+        // workstation as `ssh <host> lonko chat-link`. Pure stdio pump —
+        // no TUI, no tracing-to-file. See `sources::chat_peer`.
+        return sources::chat_peer::run().await.map_err(|e| color_eyre::eyre::eyre!(e));
+    }
     if args.get(1).map(|s| s.as_str()) == Some("worktree") {
         let cwd = args.get(2).map(|s| s.as_str()).unwrap_or("");
         let branch = args.get(3).map(|s| s.as_str()).unwrap_or("");

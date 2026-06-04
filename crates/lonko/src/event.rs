@@ -76,18 +76,53 @@ pub enum Event {
         repo_root: String,
         items: Vec<(String, crate::state::PrInfo)>,
     },
+    // ── Local plugin socket (lonko-channel on THIS host) ──────────────
+    // These carry the raw `ppid` the plugin announces; `app.rs` translates
+    // ppid→session_id before touching host-aware chat state and fanning the
+    // event out to connected peers.
     /// A `lonko-channel` plugin connected and announced its agent.
     /// `ppid` matches the Claude Code session's PID we already track.
-    ChatOnline { ppid: u32, pid: u32 },
+    PluginOnline { ppid: u32 },
     /// The `lonko-channel` plugin closed its connection.
-    ChatOffline { ppid: u32 },
+    PluginOffline { ppid: u32 },
     /// Claude (running on the agent side) called the channel's `reply`
-    /// tool to send a message back to the lonko TUI.
-    ChatReply {
+    /// tool to send a message back to the lonko TUI. `agent_id` is the
+    /// ppid stringified.
+    PluginReply {
         agent_id: String,
         text: String,
         in_reply_to: String,
     },
     /// The plugin acknowledged a `chat.send` frame the daemon emitted.
-    ChatAck { msg_id: String, status: String },
+    PluginAck { msg_id: String, status: String },
+
+    // ── Host-aware chat (keyed by session_id; host = None for local) ───
+    // Emitted both by `app.rs` after translating the local plugin events
+    // above, and by the chat-link stdout reader for a remote host (with
+    // `host = Some(<peer>)`). They drive `chat_online`/`chat_logs`.
+    ChatOnline { host: Option<String>, session_id: String },
+    ChatOffline { host: Option<String>, session_id: String },
+    ChatReply {
+        host: Option<String>,
+        session_id: String,
+        text: String,
+        in_reply_to: String,
+    },
+    ChatAck {
+        host: Option<String>,
+        session_id: String,
+        msg_id: String,
+        status: String,
+    },
+
+    // ── Peer transport (cross-host chat over SSH) ─────────────────────
+    /// A peer (another lonko, connected to this host's chat-peer socket)
+    /// asked us to deliver a message to one of OUR local agents. `app.rs`
+    /// translates `session_id`→ppid and pushes it to the local plugin.
+    PeerSend { session_id: String, msg_id: String, text: String },
+    /// A new peer connected to this host's chat-peer socket. `app.rs`
+    /// replays the current local online snapshot so the peer's TUI lights
+    /// up chat-capable agents even if their plugin announced before the
+    /// peer link existed.
+    PeerConnected,
 }

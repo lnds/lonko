@@ -521,18 +521,25 @@ pub struct AppState {
     /// render a blinking `M` underneath. Absence means "no PR for that
     /// branch" (or `gh` unavailable).
     pub pr_infos_by_repo: HashMap<String, HashMap<String, PrInfo>>,
-    /// Live chat logs per agent (keyed by `agent_id`, which in v1 is the
-    /// stringified PPID of the parent Claude Code process). Populated by
-    /// the `lonko-channel` plugin via `chat.reply` frames and by local
-    /// `chat.send` operations from the TUI.
-    pub chat_logs: HashMap<String, ChatLog>,
-    /// Set of agent_ids whose `lonko-channel` plugin is currently
-    /// connected. The TUI uses this to gate chat affordances (the chat
-    /// view only opens for online agents).
-    pub chat_online: HashSet<String>,
+    /// Live chat logs per agent, keyed by `ChatKey = (host, session_id)`.
+    /// `host == None` for local agents; `Some(<peer>)` for agents reached
+    /// over a cross-host chat-link. Populated by `chat.reply`/`peer.reply`
+    /// frames and by local `chat.send` operations from the TUI.
+    pub chat_logs: HashMap<ChatKey, ChatLog>,
+    /// Set of agents whose `lonko-channel` plugin is currently connected
+    /// (local) or announced online by a peer host (remote). The TUI uses
+    /// this to gate chat affordances (the chat view only opens for online
+    /// agents).
+    pub chat_online: HashSet<ChatKey>,
     /// Active chat overlay state (None when no chat view is open).
     pub chat_view: Option<ChatView>,
 }
+
+/// Identity of a chat-capable agent across hosts: `(host, session_id)`.
+/// `host == None` means a local agent; `Some(hostname)` a remote one
+/// reached over its chat-link. `session_id` is the stable Claude Code
+/// session UUID (`Session::id`), not the pid.
+pub type ChatKey = (Option<String>, String);
 
 /// One entry in an agent's chat log. `msg_id` and `at` are populated
 /// for every message but the UI doesn't read them yet — they exist so
@@ -564,12 +571,11 @@ pub struct ChatLog {
 }
 
 /// State for the chat overlay shown when the user activates an agent's
-/// chat view. `agent_id` is the Claude Code session's PID stringified
-/// (matches the PPID the plugin announces). Lives in `AppState` rather
-/// than App so render code can read it freely.
+/// chat view. `key` is the `(host, session_id)` identity of the agent.
+/// Lives in `AppState` rather than App so render code can read it freely.
 #[derive(Debug, Clone)]
 pub struct ChatView {
-    pub agent_id: String,
+    pub key: ChatKey,
     pub input: String,
     /// Number of messages to skip from the end when rendering. `0` means
     /// pin to the latest message (the common case); incremented by the
@@ -829,20 +835,17 @@ impl Default for AppState {
 }
 
 impl AppState {
-    pub fn on_chat_online(&mut self, ppid: u32, _pid: u32) {
-        self.chat_online.insert(ppid.to_string());
+    pub fn on_chat_online(&mut self, key: ChatKey) {
+        self.chat_online.insert(key);
     }
 
-    pub fn on_chat_offline(&mut self, ppid: u32) {
-        self.chat_online.remove(&ppid.to_string());
+    pub fn on_chat_offline(&mut self, key: &ChatKey) {
+        self.chat_online.remove(key);
     }
 
-    pub fn on_chat_reply(&mut self, agent_id: &str, text: String, _in_reply_to: String) {
-        let viewing = self
-            .chat_view
-            .as_ref()
-            .is_some_and(|v| v.agent_id == agent_id);
-        let log = self.chat_logs.entry(agent_id.to_string()).or_default();
+    pub fn on_chat_reply(&mut self, key: ChatKey, text: String, _in_reply_to: String) {
+        let viewing = self.chat_view.as_ref().is_some_and(|v| v.key == key);
+        let log = self.chat_logs.entry(key).or_default();
         log.messages.push(ChatMessage {
             msg_id: String::new(),
             direction: ChatDirection::In,
@@ -854,17 +857,17 @@ impl AppState {
         }
     }
 
-    pub fn on_chat_ack(&mut self, _msg_id: &str, _status: &str) {
+    pub fn on_chat_ack(&mut self, _key: &ChatKey, _msg_id: &str, _status: &str) {
         // v1: no per-message UI state to update yet. Hook is in place
         // for v2 to flip a "delivered" indicator on the outbound bubble.
     }
 
-    /// Append an outbound message to the chat log for `agent_id`. Returns
-    /// the freshly-minted msg_id so callers can hand it to the writer
-    /// task and later match the `chat.ack` frame.
-    pub fn record_chat_send(&mut self, agent_id: &str, text: String) -> String {
+    /// Append an outbound message to the chat log for `key`. Returns the
+    /// freshly-minted msg_id so callers can hand it to the writer task and
+    /// later match the `chat.ack` frame.
+    pub fn record_chat_send(&mut self, key: ChatKey, text: String) -> String {
         let msg_id = format!("m{}", self.tick);
-        let log = self.chat_logs.entry(agent_id.to_string()).or_default();
+        let log = self.chat_logs.entry(key).or_default();
         log.messages.push(ChatMessage {
             msg_id: msg_id.clone(),
             direction: ChatDirection::Out,
@@ -3873,17 +3876,24 @@ mod tests {
     #[test]
     fn chat_online_offline_toggles_membership() {
         let mut state = AppState::default();
-        state.on_chat_online(42, 100);
-        assert!(state.chat_online.contains("42"));
-        state.on_chat_offline(42);
-        assert!(!state.chat_online.contains("42"));
+        let local: ChatKey = (None, "uuid-1".into());
+        state.on_chat_online(local.clone());
+        assert!(state.chat_online.contains(&local));
+        // A remote agent keys independently by host.
+        let remote: ChatKey = (Some("kayshon".into()), "uuid-1".into());
+        state.on_chat_online(remote.clone());
+        assert!(state.chat_online.contains(&remote));
+        state.on_chat_offline(&local);
+        assert!(!state.chat_online.contains(&local));
+        assert!(state.chat_online.contains(&remote));
     }
 
     #[test]
     fn chat_reply_appended_increments_unread_when_view_closed() {
         let mut state = AppState::default();
-        state.on_chat_reply("42", "hello".into(), String::new());
-        let log = state.chat_logs.get("42").expect("log created");
+        let key: ChatKey = (None, "uuid-1".into());
+        state.on_chat_reply(key.clone(), "hello".into(), String::new());
+        let log = state.chat_logs.get(&key).expect("log created");
         assert_eq!(log.messages.len(), 1);
         assert_eq!(log.messages[0].direction, ChatDirection::In);
         assert_eq!(log.unread, 1);
@@ -3892,27 +3902,30 @@ mod tests {
     #[test]
     fn chat_reply_does_not_increment_unread_when_view_open_for_agent() {
         let mut state = AppState::default();
+        let key: ChatKey = (None, "uuid-1".into());
         state.chat_view = Some(ChatView {
-            agent_id: "42".into(),
+            key: key.clone(),
             input: String::new(),
             scroll: 0,
         });
-        state.on_chat_reply("42", "hi".into(), String::new());
-        assert_eq!(state.chat_logs.get("42").unwrap().unread, 0);
+        state.on_chat_reply(key.clone(), "hi".into(), String::new());
+        assert_eq!(state.chat_logs.get(&key).unwrap().unread, 0);
         // A reply to a different agent must still bump that agent's unread.
-        state.on_chat_reply("99", "hi".into(), String::new());
-        assert_eq!(state.chat_logs.get("99").unwrap().unread, 1);
+        let other: ChatKey = (None, "uuid-2".into());
+        state.on_chat_reply(other.clone(), "hi".into(), String::new());
+        assert_eq!(state.chat_logs.get(&other).unwrap().unread, 1);
     }
 
     #[test]
     fn record_chat_send_appends_outbound_with_unique_msg_id() {
         let mut state = AppState::default();
+        let key: ChatKey = (None, "uuid-1".into());
         state.tick = 5;
-        let id1 = state.record_chat_send("42", "first".into());
+        let id1 = state.record_chat_send(key.clone(), "first".into());
         state.tick = 6;
-        let id2 = state.record_chat_send("42", "second".into());
+        let id2 = state.record_chat_send(key.clone(), "second".into());
         assert_ne!(id1, id2);
-        let log = state.chat_logs.get("42").unwrap();
+        let log = state.chat_logs.get(&key).unwrap();
         assert_eq!(log.messages.len(), 2);
         assert!(log.messages.iter().all(|m| m.direction == ChatDirection::Out));
     }

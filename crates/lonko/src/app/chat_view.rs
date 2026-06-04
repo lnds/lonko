@@ -5,32 +5,42 @@
 use crossterm::event::KeyCode;
 
 use super::App;
+use crate::control::tmux;
 use crate::sources::chat::ChatFrame;
-use crate::state::ChatView;
+use crate::sources::chat_peer::PeerFrame;
+use crate::state::{ChatKey, ChatView};
 
 impl App {
     /// Try to open a chat overlay for the currently-selected Agents-tab
-    /// session. No-op if no session is selected, if its lonko-channel
-    /// plugin isn't currently online (we'd have nowhere to deliver the
-    /// `chat.send`), or if a chat view is already open.
+    /// session. No-op if no session is selected or a chat view is already
+    /// open. Gated on chat-capability (P5): if the agent's channel plugin
+    /// isn't connected (local) or hasn't been announced online by its host
+    /// (remote), we surface a brief message instead of opening a view that
+    /// would silently fail to deliver.
     pub(super) fn open_chat_for_selected(&mut self) {
         if self.state.chat_view.is_some() {
             return;
         }
         let Some(session) = self.state.selected_session() else { return };
-        // v1: agent_id is the Claude Code PID stringified (the same value
-        // the plugin announced as PPID via `chat.online`).
-        let agent_id = session.pid.to_string();
-        if !self.state.chat_online.contains(&agent_id) {
+        // Identity is (host, session_id): host = None for local agents,
+        // Some(<peer>) for remote ones reached over a chat-link.
+        let key: ChatKey = (session.host.clone(), session.id.clone());
+        if !self.state.chat_online.contains(&key) {
+            // P5: chat affordance reflects real capability.
+            let why = match &key.0 {
+                Some(host) => format!("chat offline — no channel on {host}"),
+                None => "chat offline — plugin not connected".to_string(),
+            };
+            tmux::display_message(&why);
             return;
         }
         self.state.chat_view = Some(ChatView {
-            agent_id: agent_id.clone(),
+            key: key.clone(),
             input: String::new(),
             scroll: 0,
         });
         // Opening the view counts as "read"; reset unread for that agent.
-        if let Some(log) = self.state.chat_logs.get_mut(&agent_id) {
+        if let Some(log) = self.state.chat_logs.get_mut(&key) {
             log.unread = 0;
         }
     }
@@ -50,10 +60,10 @@ impl App {
             }
             KeyCode::Enter => {
                 let text = std::mem::take(&mut view.input);
-                let agent_id = view.agent_id.clone();
+                let key = view.key.clone();
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
-                    self.dispatch_chat_send(&agent_id, trimmed.to_string());
+                    self.dispatch_chat_send(key, trimmed.to_string());
                 }
             }
             KeyCode::Backspace => {
@@ -73,21 +83,41 @@ impl App {
         true
     }
 
-    /// Look up the plugin writer for `agent_id`, append the message to
-    /// the local log, and queue a `chat.send` frame on the writer.
-    /// Drops the message silently with a warn log if the plugin is gone.
-    fn dispatch_chat_send(&mut self, agent_id: &str, text: String) {
-        let Ok(ppid) = agent_id.parse::<u32>() else {
-            tracing::warn!("chat: non-numeric agent_id={agent_id}");
-            return;
-        };
-        let Some(writer) = self.chat_registry.get(ppid) else {
-            tracing::warn!("chat: no plugin connected for agent_id={agent_id}");
-            return;
-        };
-        let msg_id = self.state.record_chat_send(agent_id, text.clone());
-        if writer.send(ChatFrame::Send { msg_id, text }).is_err() {
-            tracing::warn!("chat: writer channel closed for agent_id={agent_id}");
+    /// Record the outbound message in the log, then route it: a **local**
+    /// agent (host = None) goes straight to its plugin connection via the
+    /// chat registry; a **remote** agent (host = Some) goes over that host's
+    /// chat-link as a `peer.send`. Drops with a warn if the transport is
+    /// gone (plugin disconnected / link reaped).
+    fn dispatch_chat_send(&mut self, key: ChatKey, text: String) {
+        let msg_id = self.state.record_chat_send(key.clone(), text.clone());
+        match &key.0 {
+            None => {
+                // Local: session_id → ppid → plugin writer.
+                let session_id = &key.1;
+                let Some(ppid) = self.session_id_to_ppid(session_id) else {
+                    tracing::warn!("chat: no local session for {session_id}");
+                    return;
+                };
+                let Some(writer) = self.chat_registry.get(ppid) else {
+                    tracing::warn!("chat: no plugin connected for ppid={ppid}");
+                    return;
+                };
+                if writer.send(ChatFrame::Send { msg_id, text }).is_err() {
+                    tracing::warn!("chat: writer channel closed for ppid={ppid}");
+                }
+            }
+            Some(host) => {
+                // Remote: send over the host's chat-link as a peer.send.
+                let Some(link) = self.chat_links.get(host) else {
+                    tracing::warn!("chat: no chat-link to {host}");
+                    return;
+                };
+                link.send(PeerFrame::Send {
+                    session_id: key.1.clone(),
+                    msg_id,
+                    text,
+                });
+            }
         }
     }
 }

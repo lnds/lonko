@@ -37,7 +37,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let online = state.chat_online.contains(&view.agent_id);
+    let online = state.chat_online.contains(&view.key);
     let input_rows = wrapped_input_rows(&view.input, inner.width, inner.height, online);
     // Vertical split: log area (rest), separator + input line(s).
     let chunks = Layout::default()
@@ -45,7 +45,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         .constraints([Constraint::Min(1), Constraint::Length(1 + input_rows)])
         .split(inner);
 
-    render_log(frame, chunks[0], state.chat_logs.get(&view.agent_id), view.scroll);
+    render_log(frame, chunks[0], state.chat_logs.get(&view.key), view.scroll);
     render_input(frame, chunks[1], &view.input, online);
 }
 
@@ -58,9 +58,9 @@ fn chat_title(state: &AppState, view: &ChatView, available: u16) -> String {
     let session = state
         .sessions
         .iter()
-        .find(|s| s.pid.to_string() == view.agent_id);
+        .find(|s| s.host == view.key.0 && s.id == view.key.1);
     let Some(session) = session else {
-        return format!(" chat · agent {} ", view.agent_id);
+        return format!(" chat · agent {} ", view.key.1);
     };
 
     let name = session.display_name();

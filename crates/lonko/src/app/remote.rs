@@ -7,6 +7,7 @@
 use super::{App, refresh_no_follow_sentinel_async, write_no_follow_sentinel};
 use crate::control::tmux;
 use crate::event::Event;
+use crate::sources::chat_peer::PeerFrame;
 use crate::state::{Session, SessionStatus, Tab};
 
 // ── Free helpers ───────────────────────────────────────────────────────────────
@@ -196,6 +197,13 @@ impl App {
         self.remote_bridges.clear();
         self.remote_bridge_starting.clear();
 
+        // Tear down cross-host chat-links too (their Drop reaps the ssh
+        // child via kill_on_drop). Remote chat state is dropped below when
+        // we retain only host-less sessions.
+        self.chat_links.clear();
+        self.state.chat_online.retain(|(host, _)| host.is_none());
+        self.state.chat_logs.retain(|(host, _), _| host.is_none());
+
         // Drop the Tailnet caches and Remote-tab host list.
         self.remote_online_hosts.clear();
         self.state.remote_hosts.clear();
@@ -273,6 +281,99 @@ impl App {
                     .map_err(|e| e.to_string());
                 let _ = tx.send(Event::RemoteBridgeStarted { host, result });
             });
+        }
+    }
+
+    /// Translate a local plugin's `ppid` to its agent `session_id` by
+    /// finding the local `Session` whose `pid == ppid`. `None` when no such
+    /// session exists yet (the plugin announced before the hook landed).
+    pub(super) fn ppid_to_session_id(&self, ppid: u32) -> Option<String> {
+        self.state
+            .sessions
+            .iter()
+            .find(|s| s.host.is_none() && s.pid == ppid)
+            .map(|s| s.id.clone())
+    }
+
+    /// Reverse of `ppid_to_session_id`: the local `Session`'s `pid` for a
+    /// given `session_id`, used to route an inbound `peer.send` to the
+    /// right plugin connection.
+    pub(super) fn session_id_to_ppid(&self, session_id: &str) -> Option<u32> {
+        self.state
+            .sessions
+            .iter()
+            .find(|s| s.host.is_none() && s.id == session_id)
+            .map(|s| s.pid)
+    }
+
+    /// Try to resolve a connected local plugin's ppid to a session_id. On
+    /// first success, mark the agent chat-online locally and announce it to
+    /// connected peers. Idempotent: a plugin already resolved is left alone.
+    pub(super) fn resolve_chat_plugin(&mut self, ppid: u32) {
+        if matches!(self.chat_plugins.get(&ppid), Some(Some(_))) {
+            return; // already resolved
+        }
+        let Some(session_id) = self.ppid_to_session_id(ppid) else { return };
+        self.chat_plugins.insert(ppid, Some(session_id.clone()));
+        self.state.on_chat_online((None, session_id.clone()));
+        self.chat_peers.broadcast(&PeerFrame::Online { session_id });
+    }
+
+    /// Retry translation for any plugin connections still unresolved (the
+    /// race where a plugin announced before its hook-created session
+    /// landed). Called once per tick; cheap when there is nothing pending.
+    pub(super) fn resolve_pending_chat_plugins(&mut self) {
+        let pending: Vec<u32> = self
+            .chat_plugins
+            .iter()
+            .filter(|(_, sid)| sid.is_none())
+            .map(|(ppid, _)| *ppid)
+            .collect();
+        for ppid in pending {
+            self.resolve_chat_plugin(ppid);
+        }
+    }
+
+    /// Reconcile cross-host chat-links against the online host set, mirroring
+    /// `sync_remote_bridges`. One `ssh <host> lonko chat-link` child per
+    /// online host (parity with bridges); dead links are dropped and retried
+    /// next cycle. `ChatLink::start` is non-blocking (`tokio::process`), so
+    /// links are created inline rather than via a `spawn_blocking` event.
+    pub(super) fn sync_chat_links(&mut self) {
+        let Some(ref tx) = self.scan_tx else { return };
+
+        let desired: std::collections::HashSet<String> = self
+            .remote_online_hosts
+            .iter()
+            .filter(|h| !self.state.excluded_hosts.contains(*h))
+            .cloned()
+            .collect();
+
+        // Drop links for hosts that are gone or whose ssh child exited.
+        self.chat_links.retain(|host, link| {
+            if !desired.contains(host) {
+                return false;
+            }
+            if !link.is_alive() {
+                tracing::warn!("chat-link to {host} exited; will retry");
+                return false;
+            }
+            true
+        });
+
+        // Start links for desired hosts that don't have one yet.
+        for host in desired {
+            if self.chat_links.contains_key(&host) {
+                continue;
+            }
+            match crate::sources::chat_link::ChatLink::start(&host, tx.clone()) {
+                Ok(link) => {
+                    self.chat_links.insert(host, link);
+                }
+                Err(e) => {
+                    tracing::warn!("chat-link to {host} failed to start: {e}");
+                }
+            }
         }
     }
 
@@ -396,5 +497,59 @@ impl App {
             );
             self.state.sessions.push(session);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Session;
+    use tokio::sync::mpsc;
+
+    /// The core cross-host translation: a local plugin (ppid) resolves to
+    /// its session_id, marks the agent chat-online locally, and announces
+    /// it to connected peers as a `PeerFrame::Online`.
+    #[test]
+    fn resolve_chat_plugin_translates_and_broadcasts() {
+        let mut app = App::new();
+        let mut s = Session::new("uuid-x".to_string(), 4242, "/tmp".to_string());
+        s.host = None;
+        app.state.sessions.push(s);
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<PeerFrame>();
+        app.chat_peers.add(tx);
+
+        app.chat_plugins.insert(4242, None);
+        app.resolve_chat_plugin(4242);
+
+        // Local online state keyed by (None, session_id).
+        assert!(app.state.chat_online.contains(&(None, "uuid-x".to_string())));
+        // Peer received the translated Online frame.
+        match rx.try_recv() {
+            Ok(PeerFrame::Online { session_id }) => assert_eq!(session_id, "uuid-x"),
+            other => panic!("expected PeerFrame::Online, got {other:?}"),
+        }
+        // Both translation directions resolve.
+        assert_eq!(app.session_id_to_ppid("uuid-x"), Some(4242));
+        assert_eq!(app.ppid_to_session_id(4242), Some("uuid-x".to_string()));
+    }
+
+    /// A plugin that announces before its `Session` exists stays unresolved
+    /// (no false online), then resolves once the session lands.
+    #[test]
+    fn resolve_chat_plugin_defers_until_session_exists() {
+        let mut app = App::new();
+        app.chat_plugins.insert(7000, None);
+
+        app.resolve_chat_plugin(7000);
+        assert!(app.state.chat_online.is_empty(), "no session yet → not online");
+        assert_eq!(app.chat_plugins.get(&7000), Some(&None));
+
+        // Session appears; the retry resolves it.
+        let mut s = Session::new("uuid-late".to_string(), 7000, "/tmp".to_string());
+        s.host = None;
+        app.state.sessions.push(s);
+        app.resolve_pending_chat_plugins();
+        assert!(app.state.chat_online.contains(&(None, "uuid-late".to_string())));
     }
 }

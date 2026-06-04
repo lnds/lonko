@@ -22,8 +22,13 @@
 //! chat needs a persistent full-duplex pipe so the daemon can push
 //! `chat.send` back to the plugin at any time.
 //!
-//! v1 is local-only. The tailnet TCP transport for cross-host chat is
-//! deferred to v2 (see `docs/proposals/channels.md`).
+//! Cross-host chat (v2) reuses this same router: in addition to plugin
+//! connections, the router binds a second "peer" socket
+//! (`lonko-chat-peer.sock`) that a remote host's `lonko chat-link` SSH
+//! child connects to. The peer socket speaks `PeerFrame` (keyed by
+//! `session_id`, see `sources::chat_peer`); the plugin socket speaks
+//! `ChatFrame` (keyed by `ppid`). The two are bridged in `app.rs`, which
+//! owns the ppid↔session_id translation. See `docs/proposals/channels.md`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -179,28 +184,28 @@ async fn handle_connection(
             continue;
         }
         match serde_json::from_str::<ChatFrame>(&line) {
-            Ok(ChatFrame::Online { ppid, pid }) => {
+            Ok(ChatFrame::Online { ppid, pid: _ }) => {
                 registry.insert(ppid, write_tx.clone());
                 bound_ppid = Some(ppid);
-                let _ = tx.send(Event::ChatOnline { ppid, pid });
+                let _ = tx.send(Event::PluginOnline { ppid });
             }
             Ok(ChatFrame::Reply {
                 in_reply_to,
                 text,
                 agent_id,
             }) => {
-                let _ = tx.send(Event::ChatReply {
+                let _ = tx.send(Event::PluginReply {
                     in_reply_to,
                     text,
                     agent_id,
                 });
             }
             Ok(ChatFrame::Ack { msg_id, status }) => {
-                let _ = tx.send(Event::ChatAck { msg_id, status });
+                let _ = tx.send(Event::PluginAck { msg_id, status });
             }
             Ok(ChatFrame::Offline { ppid }) => {
                 registry.remove(ppid);
-                let _ = tx.send(Event::ChatOffline { ppid });
+                let _ = tx.send(Event::PluginOffline { ppid });
             }
             Ok(ChatFrame::Send { .. }) => {
                 tracing::warn!("chat: ignoring unexpected inbound chat.send frame");
@@ -213,8 +218,150 @@ async fn handle_connection(
 
     if let Some(ppid) = bound_ppid {
         registry.remove(ppid);
-        let _ = tx.send(Event::ChatOffline { ppid });
+        let _ = tx.send(Event::PluginOffline { ppid });
     }
+    drop(write_tx);
+    let _ = writer.await;
+}
+
+// ── Peer transport (cross-host chat over SSH) ───────────────────────────────
+
+use crate::sources::chat_peer::PeerFrame;
+
+/// Path of the second socket the router binds for peer (`chat-link`)
+/// connections. Distinct from the plugin socket so the two protocols
+/// (`ChatFrame` by ppid vs `PeerFrame` by session_id) never mix.
+pub fn peer_socket_path() -> PathBuf {
+    crate::agents::claude::config_dir().join("lonko-chat-peer.sock")
+}
+
+/// Writer handle for one connected peer (a remote host's `chat-link`).
+pub type PeerWriter = mpsc::UnboundedSender<PeerFrame>;
+
+/// Live set of connected peers. The local router broadcasts a `PeerFrame`
+/// to every peer whenever a local plugin goes online/offline or replies,
+/// so a remote workstation watching this host sees the same chat activity.
+#[derive(Clone, Default)]
+pub struct PeerHub {
+    inner: Arc<Mutex<Vec<(u64, PeerWriter)>>>,
+    next: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl PeerHub {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a peer writer; returns an id for later removal.
+    pub fn add(&self, w: PeerWriter) -> u64 {
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.lock().expect("peer hub mutex poisoned").push((id, w));
+        id
+    }
+
+    pub fn remove(&self, id: u64) {
+        self.inner.lock().expect("peer hub mutex poisoned").retain(|(i, _)| *i != id);
+    }
+
+    /// Send `frame` to every connected peer, dropping any whose channel
+    /// has closed.
+    pub fn broadcast(&self, frame: &PeerFrame) {
+        self.inner
+            .lock()
+            .expect("peer hub mutex poisoned")
+            .retain(|(_, w)| w.send(frame.clone()).is_ok());
+    }
+
+    #[allow(dead_code)] // used by tests and useful for debug logging
+    pub fn peer_count(&self) -> usize {
+        self.inner.lock().expect("peer hub mutex poisoned").len()
+    }
+}
+
+/// Spawn a tokio task listening on the chat **peer** Unix socket. Each
+/// accepted connection is a remote host's `chat-link` relaying chat over
+/// SSH; its writer is registered in `hub` so the router can broadcast to it.
+pub fn spawn_peer_listener(tx: mpsc::UnboundedSender<Event>, hub: PeerHub) -> Result<()> {
+    spawn_peer_listener_at(peer_socket_path(), tx, hub)
+}
+
+pub fn spawn_peer_listener_at(
+    path: PathBuf,
+    tx: mpsc::UnboundedSender<Event>,
+    hub: PeerHub,
+) -> Result<()> {
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let listener = UnixListener::bind(&path)?;
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let tx = tx.clone();
+                    let hub = hub.clone();
+                    tokio::spawn(handle_peer_connection(stream, tx, hub));
+                }
+                Err(e) => {
+                    tracing::error!("chat peer socket accept failed: {e}");
+                    break;
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Service one peer (`chat-link`) connection: register its writer for
+/// broadcasts, forward inbound `peer.send` frames to the App as
+/// `Event::PeerSend`, and notify the App so it can replay the current
+/// online snapshot to the freshly-connected peer.
+async fn handle_peer_connection(
+    stream: tokio::net::UnixStream,
+    tx: mpsc::UnboundedSender<Event>,
+    hub: PeerHub,
+) {
+    let (read_half, mut write_half) = stream.into_split();
+    let (write_tx, mut write_rx) = mpsc::unbounded_channel::<PeerFrame>();
+
+    let writer = tokio::spawn(async move {
+        while let Some(frame) = write_rx.recv().await {
+            let Ok(line) = serde_json::to_string(&frame) else { continue };
+            if write_half.write_all(line.as_bytes()).await.is_err() {
+                break;
+            }
+            if write_half.write_all(b"\n").await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let peer_id = hub.add(write_tx.clone());
+    // Ask the App to replay the current online set to this new peer.
+    let _ = tx.send(Event::PeerConnected);
+
+    let mut lines = BufReader::new(read_half).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<PeerFrame>(&line) {
+            Ok(PeerFrame::Send { session_id, msg_id, text }) => {
+                let _ = tx.send(Event::PeerSend { session_id, msg_id, text });
+            }
+            // Online/Offline/Reply/Ack only flow router→peer; ignore if a
+            // peer ever sends them inbound.
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("chat peer: bad frame: {e}: {line}");
+            }
+        }
+    }
+
+    hub.remove(peer_id);
     drop(write_tx);
     let _ = writer.await;
 }
@@ -319,11 +466,10 @@ mod tests {
             .unwrap()
             .unwrap();
         match online {
-            Event::ChatOnline { ppid, pid } => {
+            Event::PluginOnline { ppid } => {
                 assert_eq!(ppid, 42);
-                assert_eq!(pid, 1001);
             }
-            other => panic!("expected ChatOnline, got {other:?}"),
+            other => panic!("expected PluginOnline, got {other:?}"),
         }
         assert!(registry.contains(42));
 
@@ -354,12 +500,12 @@ mod tests {
             .unwrap()
             .unwrap();
         match reply {
-            Event::ChatReply { agent_id, text, in_reply_to } => {
+            Event::PluginReply { agent_id, text, in_reply_to } => {
                 assert_eq!(agent_id, "42");
                 assert_eq!(text, "hi user");
                 assert_eq!(in_reply_to, "m1");
             }
-            other => panic!("expected ChatReply, got {other:?}"),
+            other => panic!("expected PluginReply, got {other:?}"),
         }
 
         // Closing the client side must trigger Offline + registry removal.
@@ -370,10 +516,100 @@ mod tests {
             .unwrap()
             .unwrap();
         match offline {
-            Event::ChatOffline { ppid } => assert_eq!(ppid, 42),
-            other => panic!("expected ChatOffline, got {other:?}"),
+            Event::PluginOffline { ppid } => assert_eq!(ppid, 42),
+            other => panic!("expected PluginOffline, got {other:?}"),
         }
         assert!(!registry.contains(42));
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn peer_hub_add_broadcast_remove() {
+        let hub = PeerHub::new();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PeerFrame>();
+        let id = hub.add(tx);
+        assert_eq!(hub.peer_count(), 1);
+        hub.broadcast(&PeerFrame::Online { session_id: "u".into() });
+        assert!(matches!(rx.try_recv(), Ok(PeerFrame::Online { .. })));
+        hub.remove(id);
+        assert_eq!(hub.peer_count(), 0);
+    }
+
+    #[test]
+    fn peer_hub_prunes_dead_writers_on_broadcast() {
+        let hub = PeerHub::new();
+        let (tx, rx) = mpsc::unbounded_channel::<PeerFrame>();
+        hub.add(tx);
+        drop(rx); // receiver gone → the next send fails
+        hub.broadcast(&PeerFrame::Offline { session_id: "u".into() });
+        assert_eq!(hub.peer_count(), 0, "dead writer should be pruned");
+    }
+
+    /// Peer-socket round-trip: connect as a fake `chat-link`, send a
+    /// `peer.send` (→ `Event::PeerSend`), and read a broadcast frame pushed
+    /// through the `PeerHub`.
+    #[tokio::test]
+    async fn peer_socket_send_in_and_broadcast_out() {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader as TokioBufReader};
+        use tokio::net::UnixStream;
+
+        let tmp = std::env::temp_dir()
+            .join(format!("lonko-chat-peer-test-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Event>();
+        let hub = PeerHub::new();
+        spawn_peer_listener_at(tmp.clone(), event_tx, hub.clone()).unwrap();
+
+        let stream = {
+            let mut s = None;
+            for _ in 0..20 {
+                if let Ok(stream) = UnixStream::connect(&tmp).await {
+                    s = Some(stream);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            s.expect("connect to peer socket")
+        };
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = TokioBufReader::new(read_half).lines();
+
+        // Connecting must emit PeerConnected so the App can replay snapshots.
+        let connected = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(connected, Event::PeerConnected));
+
+        // Inbound peer.send → Event::PeerSend.
+        write_half
+            .write_all(b"{\"kind\":\"peer.send\",\"session_id\":\"uuid-x\",\"msg_id\":\"m1\",\"text\":\"hi\"}\n")
+            .await
+            .unwrap();
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match sent {
+            Event::PeerSend { session_id, msg_id, text } => {
+                assert_eq!(session_id, "uuid-x");
+                assert_eq!(msg_id, "m1");
+                assert_eq!(text, "hi");
+            }
+            other => panic!("expected PeerSend, got {other:?}"),
+        }
+
+        // Outbound: a broadcast must reach the connected peer.
+        hub.broadcast(&PeerFrame::Reply {
+            session_id: "uuid-x".into(),
+            in_reply_to: "m1".into(),
+            text: "pong".into(),
+        });
+        let line = reader.next_line().await.unwrap().unwrap();
+        assert!(line.contains(r#""kind":"peer.reply""#));
+        assert!(line.contains(r#""text":"pong""#));
 
         let _ = std::fs::remove_file(&tmp);
     }
