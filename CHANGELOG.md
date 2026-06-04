@@ -1,3 +1,9 @@
+## v0.28.0 (2026-06-04)
+
+### Feat
+
+- **chat**: cross-host chat over SSH (lonko-channel v2)
+
 ## v0.27.0 (2026-06-03)
 
 ### Feat
