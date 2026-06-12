@@ -4,8 +4,12 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")" && pwd)"
 
 echo "==> Building lonko..."
-cargo install --path "$REPO/crates/lonko" --quiet
-cargo install --path "$REPO/crates/lonko-hook" --quiet
+# --locked: build from the committed Cargo.lock. Without it `cargo install`
+# re-resolves dependencies against the registry and can pull a newer transitive
+# crate that fails to compile (e.g. mac-notification-sys 0.6.13 conflicts with
+# the locked `time`).
+cargo install --path "$REPO/crates/lonko" --locked --quiet
+cargo install --path "$REPO/crates/lonko-hook" --locked --quiet
 echo "    lonko and lonko-hook installed to ~/.cargo/bin/"
 
 echo ""
