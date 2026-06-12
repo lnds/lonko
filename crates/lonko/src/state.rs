@@ -206,8 +206,31 @@ pub fn context_max_for_model(model: &str) -> u32 {
     }
 }
 
+/// Normalize a working directory to a single canonical form so the same
+/// logical directory always maps to the same string, no matter which source
+/// reported it (tmux `#{pane_current_path}`, a hook payload's `cwd`, a
+/// lifecycle file, ...). Those sources disagree on trailing slashes and
+/// symlink resolution; without normalization a later hook can overwrite
+/// `session.cwd` with a differently-spelled-but-equal path, which silently
+/// breaks `cwd`-keyed lookups such as bookmarks (the label "disappears").
+///
+/// Falls back to the input with trailing slashes trimmed when the path can't
+/// be canonicalized (e.g. a remote session whose cwd doesn't exist locally).
+pub fn canonical_cwd(cwd: &str) -> String {
+    if let Ok(p) = std::fs::canonicalize(cwd) {
+        return p.to_string_lossy().into_owned();
+    }
+    let trimmed = cwd.trim_end_matches('/');
+    if trimmed.is_empty() {
+        cwd.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 impl Session {
     pub fn new(id: String, pid: u32, cwd: String) -> Self {
+        let cwd = canonical_cwd(&cwd);
         let project_name = cwd
             .split('/')
             .next_back()
@@ -358,10 +381,16 @@ fn bookmarks_path() -> std::path::PathBuf {
 }
 
 pub fn load_bookmarks() -> HashMap<String, String> {
-    std::fs::read_to_string(bookmarks_path())
+    let stored: HashMap<String, String> = std::fs::read_to_string(bookmarks_path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Re-key on the canonical cwd so bookmarks saved under an older, differently
+    // normalized spelling still match `session.cwd`.
+    stored
+        .into_iter()
+        .map(|(cwd, note)| (canonical_cwd(&cwd), note))
+        .collect()
 }
 
 pub fn save_bookmarks(bookmarks: &HashMap<String, String>) {
@@ -1824,13 +1853,20 @@ impl AppState {
         }
 
         // Update cwd if available (skip for subagents — they share the parent's cwd).
+        // Compare against the raw payload first (cheap) and only canonicalize when
+        // the spellings differ, so we don't reshape an already-equal path and lose
+        // a bookmark keyed on the canonical `session.cwd`.
         if !is_subagent
-            && let Some(cwd) = &payload.cwd
-            && !cwd.is_empty()
-            && session.cwd != *cwd
+            && let Some(raw_cwd) = &payload.cwd
+            && !raw_cwd.is_empty()
+            && session.cwd != *raw_cwd
         {
-            session.cwd = cwd.clone();
-            session.project_name = cwd.split('/').next_back().unwrap_or(cwd).to_string();
+            let cwd = canonical_cwd(raw_cwd);
+            if session.cwd != cwd {
+                session.project_name =
+                    cwd.split('/').next_back().unwrap_or(&cwd).to_string();
+                session.cwd = cwd;
+            }
         }
 
         // Stamp the originating host so later operations can route to the
@@ -3695,6 +3731,54 @@ mod tests {
         // unknown event drops in `hook_event_to_status`.
         state.sessions.push(Session::new("s1".into(), 100, "/tmp/proj".into()));
         assert!(state.apply_hook(&payload, None).is_none());
+    }
+
+    #[test]
+    fn canonical_cwd_trims_trailing_slash_when_path_is_absent() {
+        // A path that doesn't exist can't be canonicalized; we still want the
+        // trailing slash gone so two spellings of the same dir compare equal.
+        assert_eq!(canonical_cwd("/no/such/dir/"), "/no/such/dir");
+        assert_eq!(canonical_cwd("/no/such/dir"), "/no/such/dir");
+        // Root stays root rather than collapsing to empty.
+        assert_eq!(canonical_cwd("/"), "/");
+    }
+
+    #[test]
+    fn canonical_cwd_is_stable_across_spellings_of_a_real_dir() {
+        // For a directory that actually exists, every spelling (with or without
+        // a trailing slash) must resolve to the same canonical string.
+        let dir = std::env::temp_dir();
+        let base = dir.to_string_lossy();
+        let with_slash = format!("{}/", base.trim_end_matches('/'));
+        assert_eq!(canonical_cwd(&base), canonical_cwd(&with_slash));
+    }
+
+    #[test]
+    fn bookmark_survives_hook_reporting_same_cwd_with_trailing_slash() {
+        // Reproduces the reported bug: a label created with `b` vanished once an
+        // agent started running. The running agent fires hooks whose `cwd` is the
+        // same directory spelled with a trailing slash; before the fix that
+        // overwrote `session.cwd` and the bookmark (keyed on cwd) stopped
+        // matching. Now `session.cwd` is canonical and stays put.
+        let dir = std::env::temp_dir();
+        let base = dir.to_string_lossy().trim_end_matches('/').to_string();
+
+        let mut state = AppState::default();
+        state.sessions.push(Session::new("s1".into(), 100, base.clone()));
+        let key = state.sessions[0].cwd.clone(); // canonical key, as `b` captures it
+        state.bookmarks.insert(key.clone(), "my label".into());
+
+        // Agent runs → hook arrives with the trailing-slash spelling.
+        let payload = hook_for("UserPromptSubmit", "s1", &format!("{base}/"));
+        state.apply_hook(&payload, None).expect("effect");
+
+        let s = state.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(s.cwd, key, "running agent must not reshape the cwd");
+        assert_eq!(
+            state.bookmarks.get(&s.cwd).map(|n| n.as_str()),
+            Some("my label"),
+            "bookmark must still resolve after the agent starts running",
+        );
     }
 
     #[test]
