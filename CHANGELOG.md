@@ -1,3 +1,9 @@
+## v0.28.1 (2026-06-12)
+
+### Fix
+
+- **bookmark**: keep cwd-keyed labels stable when an agent starts running
+
 ## v0.28.0 (2026-06-04)
 
 ### Feat
