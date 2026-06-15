@@ -1,3 +1,9 @@
+## v0.28.2 (2026-06-15)
+
+### Fix
+
+- **agents**: don't let a pending permission silently disable x/X
+
 ## v0.28.1 (2026-06-12)
 
 ### Fix
