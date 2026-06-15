@@ -1638,14 +1638,19 @@ impl App {
             KeyCode::Char('n') if self.state.active_tab == Tab::Agents => {
                 self.launch_new_agent_prompt();
             }
-            KeyCode::Char('x') if !self.state.has_waiting() => {
+            // `x`/`X` act on the *selected* card, not on a pending permission
+            // prompt (those are y/w/n). Don't gate them on `has_waiting()`:
+            // otherwise a permission prompt in any other session — including a
+            // remote one the user can't even see — silently disables kill,
+            // which reads as "x does nothing".
+            KeyCode::Char('x') => {
                 match self.state.active_tab {
                     Tab::Agents  => self.kill_and_remove_worktree(),
                     Tab::Sessions => self.kill_selected_tmux_session(),
                     Tab::Remote  => self.toggle_exclude_remote_host(),
                 }
             }
-            KeyCode::Char('X') if !self.state.has_waiting() => {
+            KeyCode::Char('X') => {
                 match self.state.active_tab {
                     Tab::Agents  => self.kill_selected_agent(),
                     Tab::Sessions => self.kill_selected_tmux_session(),
@@ -1706,7 +1711,10 @@ impl App {
     /// Hard kill: send Ctrl-C, then destroy the tmux session and remove the git worktree.
     /// Refuses to kill lonko's own session or sessions not running in a worktree.
     fn kill_and_remove_worktree(&mut self) {
-        let Some(session) = self.state.selected_session() else { return };
+        let Some(session) = self.state.selected_session() else {
+            tmux::display_message("x: no agent selected");
+            return;
+        };
 
         let cwd = session.cwd.clone();
         let pid = session.pid;
@@ -1721,6 +1729,7 @@ impl App {
         // only removes the single window, so a worktree agent in a sibling
         // window of lonko's own session can still be safely torn down.
         if self.is_own_tmux_window(pane.as_deref()) {
+            tmux::display_message("x: won't kill lonko's own tmux window");
             return;
         }
 
