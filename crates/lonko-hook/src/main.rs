@@ -34,8 +34,23 @@ fn log_path() -> std::path::PathBuf {
         .join("lonko-hook.log")
 }
 
+/// Hard cap on the hook log. The hook fires on every Claude Code event, so an
+/// unbounded append-only log grows without limit. When the file exceeds this,
+/// `log` truncates it before writing rather than rotating — debug breadcrumbs
+/// don't warrant the bookkeeping of dated files.
+const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
+
 fn log(msg: &str) {
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path()) {
+    let path = log_path();
+    let truncate = std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_LOG_BYTES);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true);
+    if truncate {
+        opts.write(true).truncate(true);
+    } else {
+        opts.append(true);
+    }
+    if let Ok(mut f) = opts.open(&path) {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -53,7 +68,6 @@ fn try_send(payload: &str, remote: bool) -> bool {
                 log(&format!("write error: {e}"));
                 false
             } else {
-                log("forwarded ok");
                 true
             }
         }
@@ -111,8 +125,6 @@ fn main() -> anyhow::Result<()> {
     // Read the hook event JSON from stdin
     let mut payload = String::new();
     io::stdin().read_to_string(&mut payload)?;
-
-    log(&format!("received: {}", payload.trim()));
 
     // Enrich with TMUX env vars if available
     let tmux_pane = std::env::var("TMUX_PANE").unwrap_or_default();
