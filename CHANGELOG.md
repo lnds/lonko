@@ -1,3 +1,9 @@
+## v0.28.3 (2026-06-28)
+
+### Fix
+
+- **hook**: cap log size and stop dumping full event payloads
+
 ## v0.28.2 (2026-06-15)
 
 ### Fix
